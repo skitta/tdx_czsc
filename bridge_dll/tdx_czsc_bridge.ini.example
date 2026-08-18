@@ -1,0 +1,26 @@
+# tdx_czsc_bridge.ini —— 与 tdx_czsc_bridge.dll 同目录的配置文件（可选）
+# 配置优先级: 环境变量 TDX_CZSC_* > 本文件 > 内置默认值
+# 需要覆盖默认值时，把本文件复制为 tdx_czsc_bridge.ini 并取消注释对应行。
+# 键 = 值；# 或 ; 开头为注释。
+
+# 命名管道名称（一般无需修改）
+;pipe_name = \\.\pipe\tdx_czsc_analyzer
+
+# Rust 服务可执行文件路径（默认: DLL 同目录 tdx_czsc_service.exe，
+# 与 deploy_to_tdx.bat 的拷贝位置一致）。服务由 DLL 自动拉起：
+# 通达信打开公式时自动启动，通达信退出时服务自动退出。
+;service_exe = D:\tdx_czsc\tdx_czsc_service.exe
+# 拉起服务后等待其就绪（管道出现）的最长时间，毫秒
+;service_startup_wait_ms = 8000
+
+# czsc 笔参数（随请求发送给服务端）
+;max_bi_num = 50
+;min_bi_len = 6
+;analysis_window = 1000
+
+# 连接与缓存
+;request_timeout_ms = 500
+;startup_timeout_ms = 500
+;connect_retry_count = 2
+;connect_retry_interval_ms = 20
+;dll_cache_capacity = 4

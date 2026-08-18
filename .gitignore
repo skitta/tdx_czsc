@@ -1,0 +1,30 @@
+# ============================================================
+# tdx_czsc 项目 .gitignore
+# ============================================================
+
+# ---- 敏感文件 ----
+# 误存的配置/凭证导出（含 API Key、代理地址等），严禁提交
+/env
+.env
+
+# ---- Rust 构建产物（cargo build 可随时重建） ----
+/rust_service/target/
+
+# ---- C++/CMake 构建产物（cmake 可随时重建） ----
+/bridge_dll/build/
+
+# ---- 运行时日志 ----
+/bridge_dll/logs/
+*.log
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 操作系统杂项 ----
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,358 @@
+syntax = "proto3";
+
+package tdx.czsc.v1;
+
+// Bridge DLL <-> Rust Service 本地 IPC 协议
+//
+// 设计目标：
+// 1. 适配 x64 通达信 + 自研 Bridge DLL + Rust Service 架构
+// 2. 覆盖 Analyze / Health / Version 三类请求
+// 3. 支持“单次分析，多通道返回”的结果模型
+// 4. 兼容第一版只传 HIGH/LOW/CLOSE，同时为后续扩展预留字段
+
+option java_package = "org.tdx.czsc.proto";
+option java_multiple_files = true;
+option csharp_namespace = "Tdx.Czsc.Proto";
+option go_package = "tdx_czsc/proto;tdxczscproto";
+
+// =========================
+// Request / Response Envelope
+// =========================
+
+message RequestEnvelope {
+  // 协议版本，例如："1.0.0"
+  string protocol_version = 1;
+
+  // 请求唯一 ID，由 DLL 生成，便于日志关联
+  uint64 request_id = 2;
+
+  oneof body {
+    AnalyzeRequest analyze = 10;
+    HealthRequest health = 11;
+    VersionRequest version = 12;
+  }
+}
+
+message ResponseEnvelope {
+  // 响应协议版本，应与服务端实际支持版本一致
+  string protocol_version = 1;
+
+  // 与请求对应的 request_id
+  uint64 request_id = 2;
+
+  // 响应状态码
+  StatusCode status = 3;
+
+  // 失败时的错误消息；成功时可为空
+  string error_message = 4;
+
+  oneof body {
+    AnalyzeResponse analyze = 10;
+    HealthResponse health = 11;
+    VersionResponse version = 12;
+  }
+}
+
+// =========================
+// Common Enums
+// =========================
+
+enum StatusCode {
+  STATUS_CODE_UNSPECIFIED = 0;
+  STATUS_OK = 1;
+  STATUS_INVALID_REQUEST = 2;
+  STATUS_UNSUPPORTED_VERSION = 3;
+  STATUS_TIMEOUT = 4;
+  STATUS_SERVICE_BUSY = 5;
+  STATUS_ANALYZE_FAILED = 6;
+  STATUS_INTERNAL_ERROR = 7;
+}
+
+enum ServiceState {
+  SERVICE_STATE_UNSPECIFIED = 0;
+  SERVICE_STARTING = 1;
+  SERVICE_READY = 2;
+  SERVICE_DEGRADED = 3;
+  SERVICE_STOPPING = 4;
+}
+
+enum ChannelKind {
+  CHANNEL_KIND_UNSPECIFIED = 0;
+
+  // 基础结构通道
+  CHANNEL_FX_TOP = 101;
+  CHANNEL_FX_BOTTOM = 102;
+  CHANNEL_BI_POINTS = 201;
+  CHANNEL_BI_DIRECTION = 202;
+
+  // 段（线段）通道：段 = 至少 3 笔、首尾同向，终结由特征序列分型确认
+  CHANNEL_SEG_POINTS = 203;
+  CHANNEL_SEG_DIRECTION = 204;
+
+  CHANNEL_ZS_UPPER = 301;
+  CHANNEL_ZS_LOWER = 302;
+  CHANNEL_ZS_MIDDLE = 303;
+
+  // 中枢边界标记：区间首尾 K 线输出 1，用于在图上画闭合矩形
+  CHANNEL_ZS_BOUNDARY = 304;
+
+  // 买卖点通道
+  CHANNEL_BUY1 = 401;
+  CHANNEL_SELL1 = 402;
+  CHANNEL_BUY2 = 403;
+  CHANNEL_SELL2 = 404;
+  CHANNEL_BUY3 = 405;
+  CHANNEL_SELL3 = 406;
+
+  // 诊断通道
+  CHANNEL_DEBUG_CACHE_HIT = 901;
+  CHANNEL_DEBUG_SERVICE_READY = 902;
+  CHANNEL_DEBUG_LATENCY_MS = 903;
+}
+
+enum FractalMark {
+  FRACTAL_MARK_UNSPECIFIED = 0;
+  FRACTAL_TOP = 1;
+  FRACTAL_BOTTOM = 2;
+}
+
+enum Direction {
+  DIRECTION_UNSPECIFIED = 0;
+  DIRECTION_UP = 1;
+  DIRECTION_DOWN = 2;
+}
+
+enum SignalKind {
+  SIGNAL_KIND_UNSPECIFIED = 0;
+  SIGNAL_BUY1 = 1;
+  SIGNAL_SELL1 = 2;
+  SIGNAL_BUY2 = 3;
+  SIGNAL_SELL2 = 4;
+  SIGNAL_BUY3 = 5;
+  SIGNAL_SELL3 = 6;
+}
+
+enum BarBuildMode {
+  BAR_BUILD_MODE_UNSPECIFIED = 0;
+
+  // 第一版推荐：open = close，vol/amount=0，dt 由 index 推导
+  BAR_BUILD_FROM_HLC3 = 1;
+
+  // 后续扩展：请求中若提供 open/high/low/close 则按 OHLC 构造
+  BAR_BUILD_FROM_OHLC = 2;
+}
+
+// =========================
+// Analyze
+// =========================
+
+message AnalyzeRequest {
+  // 分析分组，供服务端和 DLL 做缓存管理。
+  // 例："single_level_structure" / "single_level_signals"
+  string func_group = 1;
+
+  // 本次调用期望返回的 func_id 列表。
+  // 服务端可返回整个 group 的全部 channels，DLL 自行缓存和路由。
+  repeated uint32 requested_func_ids = 2;
+
+  // 可选：股票代码提示。第一版可为空。
+  string symbol_hint = 3;
+
+  // 周期提示，例如："F30" / "D" / "W"
+  string freq_hint = 4;
+
+  // 输入数据长度，原则上应与 series 各数组长度一致
+  uint32 data_len = 5;
+
+  // DLL 预计算的数据摘要，用于缓存命中
+  fixed64 input_hash = 6;
+
+  // K 线构造模式
+  BarBuildMode bar_build_mode = 7;
+
+  // 由 DLL 透传的原始序列。第一版至少提供 high / low / close。
+  MarketSeries series = 8;
+
+  // CZSC 参数与分析选项
+  CzscOptions options = 9;
+
+  // DLL 是否更偏向缓存结果；true 表示服务可优先返回缓存快照
+  bool prefer_cached = 10;
+
+  // 调用侧实例 ID，便于未来多图表/多窗口做更细粒度缓存
+  uint64 caller_instance_id = 11;
+}
+
+message AnalyzeResponse {
+  // 对当前图表快照的完整分析结果
+  AnalysisSnapshot snapshot = 1;
+
+  // 服务端缓存是否命中
+  bool service_cache_hit = 2;
+
+  // 本次请求耗时统计
+  TimingStats timing = 3;
+}
+
+message MarketSeries {
+  // 第一版 ABI 主要来自 HIGH/LOW/CLOSE；其余字段可为空
+  repeated float open = 1;
+  repeated float high = 2;
+  repeated float low = 3;
+  repeated float close = 4;
+  repeated float vol = 5;
+  repeated float amount = 6;
+
+  // 可选：未来若能获得时间上下文，可传 unix ms
+  repeated int64 dt_unix_ms = 7;
+}
+
+message CzscOptions {
+  // 对应 czsc-core 参数
+  uint32 max_bi_num = 1;
+  uint32 min_bi_len = 2;
+
+  // 实际参与分析的窗口长度；0 表示服务端自行决定
+  uint32 analysis_window = 3;
+
+  // 是否返回 channels
+  bool include_channels = 4;
+
+  // 是否返回结构化 objects；调试期建议开启，正式期可按需关闭
+  bool include_objects = 5;
+
+  // 预留：是否启用增量分析
+  bool enable_incremental = 6;
+}
+
+message AnalysisSnapshot {
+  SnapshotMeta meta = 1;
+
+  // 已对齐 DataLen 的输出通道，DLL 直接按 func_id 取值回填到 pfOUT
+  repeated ChannelSeries channels = 2;
+
+  // 结构化对象，主要用于调试、回放、后续扩展
+  repeated FractalPoint fractals = 3;
+  repeated StrokeSegment strokes = 4;
+  repeated PivotZone pivots = 5;
+  repeated SignalPoint signals = 6;
+  repeated Segment segments = 7;
+}
+
+message SnapshotMeta {
+  string symbol = 1;
+  string freq = 2;
+  uint32 data_len = 3;
+  fixed64 input_hash = 4;
+  uint32 max_bi_num = 5;
+  uint32 min_bi_len = 6;
+  uint32 analysis_window = 7;
+  uint64 generated_at_unix_ms = 8;
+  string analyzer_version = 9;
+}
+
+message ChannelSeries {
+  // 与通达信公式里使用的 func_id 对齐
+  uint32 func_id = 1;
+
+  ChannelKind kind = 2;
+
+  // 便于日志和调试，例如："fx_top"
+  string name = 3;
+
+  // 与 DataLen 对齐的输出数组；长度应等于 snapshot.meta.data_len
+  repeated float values = 4;
+}
+
+message FractalPoint {
+  uint32 index = 1;
+  FractalMark mark = 2;
+  double price = 3;
+  double high = 4;
+  double low = 5;
+}
+
+message StrokeSegment {
+  uint32 start_index = 1;
+  uint32 end_index = 2;
+  Direction direction = 3;
+  double start_price = 4;
+  double end_price = 5;
+  double high = 6;
+  double low = 7;
+}
+
+message PivotZone {
+  uint32 start_index = 1;
+  uint32 end_index = 2;
+  double upper = 3;
+  double lower = 4;
+  double middle = 5;
+}
+
+// 段（线段）：由连续笔构成（至少 3 笔、首尾同向），
+// 终结由特征序列分型确认（缠论 65 课标准线段破坏判定）。
+message Segment {
+  // 段首/末笔在已完成笔序列中的索引（调试/回放用）
+  uint32 start_bi_index = 9;
+  uint32 end_bi_index = 10;
+
+  // 段覆盖的K线区间（与通道对齐）
+  uint32 start_index = 1;
+  uint32 end_index = 2;
+  Direction direction = 3;
+  double start_price = 4;
+  double end_price = 5;
+  double high = 6;
+  double low = 7;
+
+  // 是否已被特征序列分型确认；false = 尾部未完成/暂定线段
+  bool is_sure = 8;
+}
+
+message SignalPoint {
+  uint32 index = 1;
+  SignalKind kind = 2;
+  double price = 3;
+  string label = 4;
+}
+
+message TimingStats {
+  uint32 total_ms = 1;
+  uint32 build_bars_ms = 2;
+  uint32 analyze_ms = 3;
+  uint32 map_channels_ms = 4;
+}
+
+// =========================
+// Health
+// =========================
+
+message HealthRequest {
+  // 预留字段，当前可为空
+  bool verbose = 1;
+}
+
+message HealthResponse {
+  ServiceState state = 1;
+  string message = 2;
+  uint64 uptime_ms = 3;
+  uint32 active_requests = 4;
+  uint32 cache_entries = 5;
+  string service_version = 6;
+}
+
+// =========================
+// Version
+// =========================
+
+message VersionRequest {}
+
+message VersionResponse {
+  string service_version = 1;
+  string protocol_version = 2;
+  string czsc_version = 3;
+
+  repeated string supported_func_groups = 4;
+  repeated uint32 supported_func_ids = 5;
+}

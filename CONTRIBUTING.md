@@ -68,6 +68,34 @@
 - 避免把协议耦合到算法内部
 - 优先保证 `AnalyzeRequest -> snapshot channels` 逻辑清晰可验证
 
+### Rust 代码结构约定
+
+模块职责（`rust_service/src/`，新代码遵循既有划分，不要继续堆进单文件）：
+
+| 模块 | 职责 | 依赖方向 |
+|---|---|---|
+| `analyzer/mod.rs` | 快照编排（`build_snapshot`）+ `AnalysisParams` | 只依赖子模块 |
+| `analyzer/rawbars.rs` | 请求 → RawBar（频率/量能/时间轴） | → error |
+| `analyzer/pivots.rs` | 中枢构建（前端/后端优化）+ 三买卖严格化 | → objects（仅下标对齐） |
+| `analyzer/segs.rs` | 线段识别（特征序列分型法） | 无 |
+| `analyzer/signals.rs` | 401~406 买卖点信号 | → objects（锚点对齐） |
+| `analyzer/channels.rs` | func_id → float[] 通道 + 单一映射表 | → objects/segs/signals |
+| `analyzer/objects.rs` | K线下标对齐 + proto 对象映射（`TryFrom`） | 无 |
+| `analyzer/error.rs` | `AnalysisError`（thiserror） | 无 |
+| `handlers/` | 信封分发、请求协调（缓存/单飞）、调试通道 | → analyzer |
+| `cache/` `state/` `config/` `ipc/` | 运行期支撑 | 按需 |
+
+- **错误分层**：分析管线返回 `AnalysisError`（`analyzer/error.rs`），协议层
+  （`handlers/mod.rs`）映射状态码（INVALID_REQUEST / ANALYZE_FAILED /
+  INTERNAL_ERROR）；应用胶水层用 `anyhow` 携带上下文；
+- **抽象门槛（规则三）**：至少 2~3 个真实实现才引入 trait；单一实现的
+  trait 化视为过度设计。表驱动（const 数组 + 函数指针，如 `SIGNAL_SPECS`、
+  通道映射表）优先于 trait；
+- **转换用标准 trait**：对象映射走 `TryFrom`（`objects.rs`），转换失败返回
+  `AlignError`，调用方按跳过处理；
+- **质量门**：提交前 `cargo clippy --all-targets -- -D warnings` 与
+  `cargo fmt -- --check` 必须通过（本机无 crates 网络时加 `--offline`）。
+
 ### C++ / DLL
 - 优先保证宿主安全
 - 所有失败路径都应安全降级

@@ -224,7 +224,7 @@ pub fn compute_buy_sell_points(
             let anchor_stable = czsc
                 .bi_list
                 .iter()
-                .any(|bi| super::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
+                .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
             if anchor_stable {
                 if bs_state.commit_allowed(p.func_id, p.anchor.index) {
                     bs_state.record(p.func_id, p.anchor.index);
@@ -294,7 +294,7 @@ pub fn compute_buy_sell_points(
     points.retain(|p| {
         final_bis
             .iter()
-            .any(|bi| super::fx_mid_index(&bi.fx_b) == Some(p.index))
+            .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.index))
     });
 
     // 同一锚点上多个信号同时命中时，只保留优先级最高的一个（func_id 最小）。
@@ -340,7 +340,7 @@ struct Anchor {
 /// 画在笔端分型的合并组起点、看起来落在笔的中途。
 fn latest_bi_end_anchor(czsc: &CZSC) -> Option<Anchor> {
     let bi = czsc.bi_list.last()?;
-    let index = super::fx_mid_index(&bi.fx_b)?;
+    let index = super::objects::fx_mid_index(&bi.fx_b)?;
     Some(Anchor {
         index,
         price: bi.fx_b.fx,

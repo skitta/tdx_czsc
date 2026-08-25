@@ -13,8 +13,8 @@ use czsc_core::objects::mark::Mark;
 use chrono::{Duration, Utc};
 
 use crate::config::AppConfig;
-use crate::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
 use crate::proto::analysis::{AnalysisSnapshot, ChannelSeries};
+use crate::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
 
 use super::AnalysisParams;
 
@@ -86,11 +86,10 @@ pub(crate) fn make_series_bi(idx: i64, start: f64, end: f64) -> BI {
 
 pub(crate) fn sample_close_series() -> Vec<f32> {
     vec![
-        10.0, 10.2, 10.5, 10.1, 9.8, 9.6, 9.9, 10.3, 10.7, 10.4, 10.1, 9.7, 9.5, 9.9, 10.4,
-        10.9, 10.6, 10.1, 9.8, 9.4, 9.7, 10.2, 10.8, 11.2, 10.9, 10.5, 10.0, 9.6, 9.9, 10.3,
-        10.7, 11.0, 10.8, 10.3, 9.9, 9.5, 9.8, 10.1, 10.6, 11.1, 10.7, 10.2, 9.7, 9.3, 9.6,
-        10.0, 10.5, 10.9, 10.6, 10.1, 9.8, 9.4, 9.7, 10.2, 10.6, 11.0, 10.8, 10.4, 10.0, 9.7,
-        10.0, 10.4, 10.9, 11.3,
+        10.0, 10.2, 10.5, 10.1, 9.8, 9.6, 9.9, 10.3, 10.7, 10.4, 10.1, 9.7, 9.5, 9.9, 10.4, 10.9,
+        10.6, 10.1, 9.8, 9.4, 9.7, 10.2, 10.8, 11.2, 10.9, 10.5, 10.0, 9.6, 9.9, 10.3, 10.7, 11.0,
+        10.8, 10.3, 9.9, 9.5, 9.8, 10.1, 10.6, 11.1, 10.7, 10.2, 9.7, 9.3, 9.6, 10.0, 10.5, 10.9,
+        10.6, 10.1, 9.8, 9.4, 9.7, 10.2, 10.6, 11.0, 10.8, 10.4, 10.0, 9.7, 10.0, 10.4, 10.9, 11.3,
     ]
 }
 
@@ -135,10 +134,11 @@ pub(crate) fn sample_request(include_objects: bool) -> AnalyzeRequest {
 
 /// 测试用服务配置（min_bi_len=3、窗口 64，贴近样例请求）。
 pub(crate) fn test_config() -> AppConfig {
-    let mut config = AppConfig::default();
-    config.min_bi_len = 3;
-    config.default_analysis_window = 64;
-    config
+    AppConfig {
+        min_bi_len: 3,
+        default_analysis_window: 64,
+        ..AppConfig::default()
+    }
 }
 
 /// 由样例请求 + 测试配置解析出的分析参数（`build_snapshot` 输入）。

@@ -3,14 +3,17 @@
 //! 右边框，图上只剩左侧竖线、没有上下边框和右边框。
 //! 使用仓库内的真实数据 tests/data/002340_day.csv。
 
-use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
-use tdx_czsc_service::config::AppConfig;
+use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
 use tdx_czsc_service::state::AppState;
 
 mod common;
-use common::{analyze_request, load_series};
+use common::{analyze_request, config_for, load_series};
 
-fn build_channels() -> (Vec<String>, tdx_czsc_service::proto::analysis::AnalysisSnapshot, Vec<f32>) {
+fn build_channels() -> (
+    Vec<String>,
+    tdx_czsc_service::proto::analysis::AnalysisSnapshot,
+    Vec<f32>,
+) {
     let (dates, high, low, close) = load_series("../tests/data/002340_day.csv");
 
     let request = analyze_request(
@@ -25,10 +28,7 @@ fn build_channels() -> (Vec<String>, tdx_czsc_service::proto::analysis::Analysis
         true,
     );
 
-    let mut config = AppConfig::default();
-    config.min_bi_len = 6;
-    config.default_analysis_window = 1000;
-    let state = AppState::new(config);
+    let state = AppState::new(config_for(6, 1000));
     let params = AnalysisParams::from((&request, &state.config));
     let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
 
@@ -95,6 +95,7 @@ fn adjacent_pivots_never_share_endpoints_on_real_data() {
 ///   第一个中枢与窗口起点价格比较兜底）；
 /// - **后端**：中枢最后一笔与行情趋势相反（离开笔已剔除，中枢为奇数笔
 ///   结构）。
+///
 /// 与 `build_snapshot` 的构建路径一致（同一份笔输入、同一分析窗口）。
 #[test]
 fn pivot_edges_follow_trend_on_real_data() {
@@ -122,16 +123,17 @@ fn pivot_edges_follow_trend_on_real_data() {
             false,
         );
 
-        let mut config = AppConfig::default();
-        config.min_bi_len = min_bi_len;
-        config.default_analysis_window = window;
-        let state = AppState::new(config);
+        let state = AppState::new(config_for(min_bi_len, window));
 
         let freq = parse_freq(freq_hint).expect("freq");
         let window_start = (request.data_len as usize).saturating_sub(window as usize);
-        let bars =
-            build_raw_bars(&request, freq, window_start, state.config.derive_volume_proxy)
-                .expect("bars");
+        let bars = build_raw_bars(
+            &request,
+            freq,
+            window_start,
+            state.config.derive_volume_proxy,
+        )
+        .expect("bars");
         let czsc = CZSC::new(bars, 50, min_bi_len as usize);
         let bis = czsc.get_finished_bis();
         let pivots = build_pivots(&bis);
@@ -164,7 +166,8 @@ fn pivot_edges_follow_trend_on_real_data() {
             };
             // 前端：首笔与趋势相反
             assert_eq!(
-                zs.sdir, expected_sdir,
+                zs.sdir,
+                expected_sdir,
                 "中枢{k}第一笔方向应为 {expected_sdir:?}（趋势 {trend:?}）: {csv_path} from {} zz={:.3}",
                 zs.sdt.format("%Y-%m-%d"),
                 zs.zz

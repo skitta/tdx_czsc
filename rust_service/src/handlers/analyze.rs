@@ -43,13 +43,10 @@ fn release_in_flight(state: &Arc<AppState>, cache_key: &CacheKey) {
     }
 }
 
-pub async fn handle(
-    state: &Arc<AppState>,
-    request: AnalyzeRequest,
-) -> Result<AnalyzeResponse> {
+pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<AnalyzeResponse> {
     let started = Instant::now();
     let _guard = ActiveRequestGuard::new(state.clone());
-    let options = request.options.clone().unwrap_or_default();
+    let options = request.options.unwrap_or_default();
 
     let cache_key = CacheKey {
         func_group: request.func_group.clone(),
@@ -260,9 +257,11 @@ mod tests {
     }
 
     fn state() -> std::sync::Arc<AppState> {
-        let mut config = AppConfig::default();
-        config.min_bi_len = 3;
-        config.default_analysis_window = 64;
+        let config = AppConfig {
+            min_bi_len: 3,
+            default_analysis_window: 64,
+            ..AppConfig::default()
+        };
         AppState::new(config)
     }
 

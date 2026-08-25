@@ -5,6 +5,7 @@
 //! - 同一锚点不得有多个买卖点（保留优先级最高者）；
 //! - 信号先挂起、待锚定笔被确认后再提交，并过滤掉已被 max_bi_num 清理的
 //!   早期笔上的点，避免"孤儿点"。
+//!
 //! 使用仓库内真实数据 tests/data/002340_day.csv。
 
 use czsc_core::analyze::CZSC;
@@ -14,7 +15,7 @@ use std::collections::HashSet;
 use tdx_czsc_service::analyzer::compute_buy_sell_points;
 
 mod common;
-use common::{analyze_request, load_series};
+use common::{analyze_request, config_for, load_series};
 
 fn load_bars(path: &str, window_start: usize) -> Vec<czsc_core::objects::bar::RawBar> {
     let csv = std::fs::read_to_string(path).expect("read csv");
@@ -78,7 +79,10 @@ fn signal_anchors_are_final_bi_endpoints_and_unique() {
 
     // 所有锚点必须是最终可见笔的结束分型极值K线（不在笔中途、无孤儿点）
     let endpoints = final_bi_end_extremes(&bars);
-    let bad = points.iter().filter(|p| !endpoints.contains(&p.index)).count();
+    let bad = points
+        .iter()
+        .filter(|p| !endpoints.contains(&p.index))
+        .count();
     assert_eq!(bad, 0, "买卖点必须落在最终可见笔端点上（极值K线）");
 
     // 同一锚点不得有多个买卖点（优先级最高者保留）
@@ -129,8 +133,7 @@ fn second_bs_attached_to_first_bs() {
 /// 走 build_snapshot 实际路径（严格化发生在中枢构建之后）。
 #[test]
 fn third_bs_capped_per_pivot() {
-    use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
-    use tdx_czsc_service::config::AppConfig;
+    use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
     use tdx_czsc_service::state::AppState;
 
     let (_, high, low, close) = load_series("../tests/data/002340_day.csv");
@@ -145,10 +148,7 @@ fn third_bs_capped_per_pivot() {
         1000,
         true,
     );
-    let mut config = AppConfig::default();
-    config.min_bi_len = 6;
-    config.default_analysis_window = 1000;
-    let state = AppState::new(config);
+    let state = AppState::new(config_for(6, 1000));
     let params = AnalysisParams::from((&request, &state.config));
     let snapshot = build_snapshot(&request, &params).expect("snapshot");
 

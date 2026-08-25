@@ -5,9 +5,9 @@
 //! 其余按内部错误处理），始终返回响应信封（不再向上抛错）。
 
 use crate::analyzer::AnalysisError;
-use crate::proto::analysis::{RequestEnvelope, ResponseEnvelope, StatusCode};
 use crate::proto::analysis::request_envelope::Body as RequestBody;
 use crate::proto::analysis::response_envelope::Body as ResponseBody;
+use crate::proto::analysis::{RequestEnvelope, ResponseEnvelope, StatusCode};
 use crate::state::AppState;
 
 pub mod analyze;

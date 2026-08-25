@@ -5,17 +5,20 @@
 //! - 段连续覆盖全部已完成笔（相邻段不重叠、不遗漏）；
 //! - 段端点都是分型位置（笔端点）；
 //! - 确认段（is_sure）必须满足方向校验（向上段起点低于终点、向下段反之）。
+//!
 //! 使用仓库内真实数据 tests/data/002340_day.csv（对应报告的 002340 案例）。
 
-use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
-use tdx_czsc_service::config::AppConfig;
+use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
 use tdx_czsc_service::proto::analysis::Segment;
 use tdx_czsc_service::state::AppState;
 
 mod common;
-use common::{analyze_request, load_series};
+use common::{analyze_request, config_for, load_series};
 
-fn build() -> (Vec<String>, tdx_czsc_service::proto::analysis::AnalysisSnapshot) {
+fn build() -> (
+    Vec<String>,
+    tdx_czsc_service::proto::analysis::AnalysisSnapshot,
+) {
     let (dates, high, low, close) = load_series("../tests/data/002340_day.csv");
     let request = analyze_request(
         "002340.SZ",
@@ -28,16 +31,16 @@ fn build() -> (Vec<String>, tdx_czsc_service::proto::analysis::AnalysisSnapshot)
         1000,
         true,
     );
-    let mut config = AppConfig::default();
-    config.min_bi_len = 6;
-    config.default_analysis_window = 1000;
-    let state = AppState::new(config);
+    let state = AppState::new(config_for(6, 1000));
     let params = AnalysisParams::from((&request, &state.config));
     let snapshot = build_snapshot(&request, &params).expect("snapshot");
     (dates, snapshot)
 }
 
-fn channel(snapshot: &tdx_czsc_service::proto::analysis::AnalysisSnapshot, func_id: u32) -> &Vec<f32> {
+fn channel(
+    snapshot: &tdx_czsc_service::proto::analysis::AnalysisSnapshot,
+    func_id: u32,
+) -> &Vec<f32> {
     &snapshot
         .channels
         .iter()
@@ -58,7 +61,8 @@ fn segments_cover_all_bis_contiguously_and_alternate() {
     for seg in segs {
         if let Some(p) = prev {
             assert_eq!(
-                seg.start_bi_index, p.end_bi_index + 1,
+                seg.start_bi_index,
+                p.end_bi_index + 1,
                 "段必须连续覆盖（不重叠、不遗漏）"
             );
             assert_ne!(seg.direction, p.direction, "相邻段方向必须交替");
@@ -69,7 +73,11 @@ fn segments_cover_all_bis_contiguously_and_alternate() {
     }
     // 末段终点 = 最后一笔终点（尾部未完成段也画到最新笔）
     let last_bi_idx = (snapshot.strokes.len() - 1) as u32;
-    assert_eq!(prev.unwrap().end_bi_index, last_bi_idx, "末段终点应等于最后一笔");
+    assert_eq!(
+        prev.unwrap().end_bi_index,
+        last_bi_idx,
+        "末段终点应等于最后一笔"
+    );
 }
 
 /// 确认段（is_sure=true）至少 3 笔、首尾笔同向，且价格方向与段方向一致。
@@ -91,14 +99,8 @@ fn sure_segments_have_at_least_3_bis_and_valid_direction() {
             seg.start_bi_index,
             seg.end_bi_index
         );
-        assert_eq!(
-            start_bi.direction, end_bi.direction,
-            "确认段首尾笔必须同向"
-        );
-        assert_eq!(
-            seg.direction, end_bi.direction,
-            "段方向应与末笔方向一致"
-        );
+        assert_eq!(start_bi.direction, end_bi.direction, "确认段首尾笔必须同向");
+        assert_eq!(seg.direction, end_bi.direction, "段方向应与末笔方向一致");
         if seg.direction == 1 {
             assert!(seg.start_price < seg.end_price, "向上段起点应低于终点");
         } else {
@@ -125,10 +127,7 @@ fn segment_endpoints_are_bi_endpoints_and_fractals() {
 
     // 203 ⊆ 201（段端点都是笔端点）
     for &i in &seg_positions {
-        assert!(
-            bi_pts[i].abs() > 1e-6,
-            "段端点 idx={i} 必须是笔端点（201）"
-        );
+        assert!(bi_pts[i].abs() > 1e-6, "段端点 idx={i} 必须是笔端点（201）");
     }
 
     // 段端点都是分型位置：除窗口首端截断点（第一个段起点，其分型可能
@@ -162,12 +161,10 @@ fn seg_direction_channel_matches_segments() {
         let lo = seg.start_index.min(seg.end_index) as usize;
         let hi = seg.start_index.max(seg.end_index) as usize;
         let hi_exclusive = if k + 1 < n { hi } else { hi + 1 };
-        for i in lo..hi_exclusive {
-            assert_eq!(
-                seg_dir[i], expect,
-                "204 通道在确认段覆盖区间应为 {expect}（idx={i}）"
-            );
-        }
+        assert!(
+            seg_dir[lo..hi_exclusive].iter().all(|v| *v == expect),
+            "204 通道在确认段覆盖区间 {lo}..{hi_exclusive} 应为 {expect}"
+        );
     }
 }
 
@@ -223,8 +220,7 @@ fn last_sure_segment_ends_at_buy1_anchor() {
     let seg = snapshot
         .segments
         .iter()
-        .filter(|s| s.is_sure)
-        .last()
+        .rfind(|s| s.is_sure)
         .expect("存在确认段");
     assert_eq!(dates[seg.end_index as usize], "2026-01-26");
     assert!((seg.end_price - 10.09).abs() < 1e-4);
@@ -244,7 +240,11 @@ fn segment_count_is_bounded() {
 
     let (_, snapshot) = build();
     // 50 笔窗口内，特征序列分型法应给出个位数~十位数的段
-    assert!(snapshot.segments.len() <= 20, "段数量应有限（当前 {}）", snapshot.segments.len());
+    assert!(
+        snapshot.segments.len() <= 20,
+        "段数量应有限（当前 {}）",
+        snapshot.segments.len()
+    );
     // 每个K线位置最多被标记两次（作为某段终点一次 + 作为下段起点一次）
     let mut counts: HashMap<u32, u32> = HashMap::new();
     for seg in &snapshot.segments {
@@ -252,6 +252,9 @@ fn segment_count_is_bounded() {
         *counts.entry(seg.end_index).or_insert(0) += 1;
     }
     for (pos, c) in &counts {
-        assert!(*c <= 2, "位置 {pos} 被标记 {c} 次（每位置最多一次起点+一次终点）");
+        assert!(
+            *c <= 2,
+            "位置 {pos} 被标记 {c} 次（每位置最多一次起点+一次终点）"
+        );
     }
 }

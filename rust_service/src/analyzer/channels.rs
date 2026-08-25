@@ -259,7 +259,9 @@ mod tests {
 
     #[test]
     fn channel_meta_covers_all_supported_ids() {
-        const ALL: [u32; 17] = [101, 102, 201, 202, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903];
+        const ALL: [u32; 17] = [
+            101, 102, 201, 202, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903,
+        ];
         for id in ALL {
             assert!(resolve_channel_meta(id).is_ok(), "func_id {id} 缺元数据");
         }

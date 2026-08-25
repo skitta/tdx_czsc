@@ -50,7 +50,11 @@ fn init_tracing(log_path: Option<PathBuf>) {
     if let Some(path) = log_path {
         // 追加写文件；关闭 ANSI 颜色码，避免日志文件里出现转义序列。
         // 打不开（目录只读等）时降级为 stdout，服务照常运行。
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             tracing_subscriber::fmt()
                 .with_env_filter(filter)
                 .with_target(false)
@@ -60,7 +64,10 @@ fn init_tracing(log_path: Option<PathBuf>) {
                 .init();
             return;
         }
-        eprintln!("warning: cannot open --log file {}, fallback to stdout", path.display());
+        eprintln!(
+            "warning: cannot open --log file {}, fallback to stdout",
+            path.display()
+        );
     }
 
     tracing_subscriber::fmt()

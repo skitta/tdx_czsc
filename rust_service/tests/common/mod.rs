@@ -3,9 +3,8 @@
 //! 四个回归测试文件（zs_boundary/seg/signal/divergence）此前各自维护一份
 //! 几乎相同的 CSV 解析与请求构造样板，这里统一收口。
 
-use tdx_czsc_service::proto::analysis::{
-    AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries,
-};
+use tdx_czsc_service::config::AppConfig;
+use tdx_czsc_service::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
 
 /// 读取仓库数据 CSV（`日期,开,高,低,收,...`），返回 (日期, high, low, close)。
 /// `#[allow(dead_code)]`：各测试二进制独立编译，个别测试只用 `analyze_request`。
@@ -70,5 +69,14 @@ pub fn analyze_request(
         }),
         prefer_cached: false,
         caller_instance_id: 7,
+    }
+}
+
+/// 按笔长/分析窗口构造测试配置（贴近各数据文件的实际参数）。
+pub fn config_for(min_bi_len: u32, analysis_window: u32) -> AppConfig {
+    AppConfig {
+        min_bi_len,
+        default_analysis_window: analysis_window,
+        ..AppConfig::default()
     }
 }

@@ -162,7 +162,7 @@ pub(crate) fn strictize_third_bs_by_zs(points: &mut Vec<BuySellPoint>, pivots: &
         // 归属到锚点之前最近结束的中枢（用中枢组最后一笔终点）
         let Some(zi) = pivots
             .iter()
-            .rposition(|zs| bi_end_index(zs.bis.last()).map_or(false, |e| e < p.index))
+            .rposition(|zs| bi_end_index(zs.bis.last()).is_some_and(|e| e < p.index))
         else {
             return false;
         };
@@ -222,7 +222,11 @@ mod tests {
         assert_eq!(pivots.len(), 2, "上涨场景应保留两个中枢");
         for (k, zs) in pivots.iter().enumerate() {
             assert_eq!(zs.bis.len(), 3, "中枢{k}应为奇数笔 3 笔结构");
-            assert_eq!(zs.sdir, CzscDirection::Down, "上涨行情中枢{k}第一笔必须向下");
+            assert_eq!(
+                zs.sdir,
+                CzscDirection::Down,
+                "上涨行情中枢{k}第一笔必须向下"
+            );
             assert_eq!(
                 zs.bis.last().unwrap().direction,
                 CzscDirection::Down,
@@ -310,12 +314,12 @@ mod tests {
             .collect();
         let pivots = build_pivots(&bis);
         assert_eq!(pivots.len(), 1, "破位中枢无法满足间隔规则应整组剔除");
-        assert_eq!(pivots[0].sdir, CzscDirection::Up, "下跌行情（后中枢更低）第一笔向上");
         assert_eq!(
-            pivots[0].bis[0].fx_a.fx,
-            8.0,
-            "保留的中枢应从笔 4 开始"
+            pivots[0].sdir,
+            CzscDirection::Up,
+            "下跌行情（后中枢更低）第一笔向上"
         );
+        assert_eq!(pivots[0].bis[0].fx_a.fx, 8.0, "保留的中枢应从笔 4 开始");
         assert_eq!(pivots[0].bis.len(), 5, "后一中枢保留 5 笔（末笔向上）");
 
         // 场景 4：端点共享时前端优先——后中枢前端不动，前中枢末端先退一笔
@@ -324,17 +328,17 @@ mod tests {
         // 后中枢首笔 U(11→11.5) 共享端点 11），先后退 D(25→11)（间隔）、
         // 再退 U(13→25)（方向）。
         let sweep_pts = [
-            (10.0, 20.0),  // 0 上：进入段（剔除）
-            (20.0, 12.0),  // 1 下
-            (12.0, 19.0),  // 2 上
-            (19.0, 13.0),  // 3 下
-            (13.0, 25.0),  // 4 上：上破
-            (25.0, 11.0),  // 5 下：深跌回踩，与笔 6 共享端点 11
-            (11.0, 11.5),  // 6 上：完全低于原生区间下沿（12）→ 新中枢首笔
-            (11.5, 9.0),   // 7 下
-            (9.0, 12.0),   // 8 上
-            (12.0, 8.0),   // 9 下
-            (8.0, 11.0),   // 10 上
+            (10.0, 20.0), // 0 上：进入段（剔除）
+            (20.0, 12.0), // 1 下
+            (12.0, 19.0), // 2 上
+            (19.0, 13.0), // 3 下
+            (13.0, 25.0), // 4 上：上破
+            (25.0, 11.0), // 5 下：深跌回踩，与笔 6 共享端点 11
+            (11.0, 11.5), // 6 上：完全低于原生区间下沿（12）→ 新中枢首笔
+            (11.5, 9.0),  // 7 下
+            (9.0, 12.0),  // 8 上
+            (12.0, 8.0),  // 9 下
+            (8.0, 11.0),  // 10 上
         ];
         let bis: Vec<BI> = sweep_pts
             .iter()
@@ -344,7 +348,11 @@ mod tests {
         let pivots = build_pivots(&bis);
         assert_eq!(pivots.len(), 2, "深跌回踩场景应保留两个中枢");
         // 前中枢：先退间隔一笔（笔 5），再退方向一笔（笔 4），剩 [下,上,下]
-        assert_eq!(pivots[0].sdir, CzscDirection::Down, "前中枢（上升行情）第一笔向下");
+        assert_eq!(
+            pivots[0].sdir,
+            CzscDirection::Down,
+            "前中枢（上升行情）第一笔向下"
+        );
         assert_eq!(pivots[0].bis.len(), 3, "前中枢应退回两笔后剩 3 笔");
         assert_eq!(pivots[0].bis[0].fx_a.fx, 20.0, "前中枢应从下跌笔 1 开始");
         assert_eq!(
@@ -353,7 +361,11 @@ mod tests {
             "前中枢末笔应为 D(19→13)，不再包含笔 4/5"
         );
         // 后中枢：前端优先未被触碰（首笔 U 保留），趋势向下、末笔向上
-        assert_eq!(pivots[1].sdir, CzscDirection::Up, "后中枢（下跌行情）第一笔向上");
+        assert_eq!(
+            pivots[1].sdir,
+            CzscDirection::Up,
+            "后中枢（下跌行情）第一笔向上"
+        );
         assert_eq!(pivots[1].bis[0].fx_a.fx, 11.0, "后中枢首笔应为 U(11→11.5)");
         assert_eq!(pivots[1].bis.len(), 5, "后中枢保留 5 笔");
         assert_eq!(

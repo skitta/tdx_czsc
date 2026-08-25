@@ -115,20 +115,23 @@ fn amplitude_proxy_vol(series: &MarketSeries, index: usize) -> f64 {
     (amplitude / close * 100.0).max(0.0)
 }
 
-fn resolve_bar_datetime(index: usize, provided: &[i64], freq: Freq) -> Result<DateTime<Utc>, AnalysisError> {
+fn resolve_bar_datetime(
+    index: usize,
+    provided: &[i64],
+    freq: Freq,
+) -> Result<DateTime<Utc>, AnalysisError> {
     if let Some(ts_ms) = provided.get(index) {
-        return Utc
-            .timestamp_millis_opt(*ts_ms)
-            .single()
-            .ok_or_else(|| {
-                AnalysisError::invalid_bar_data(index, format!("invalid dt_unix_ms: {ts_ms}"))
-            });
+        return Utc.timestamp_millis_opt(*ts_ms).single().ok_or_else(|| {
+            AnalysisError::invalid_bar_data(index, format!("invalid dt_unix_ms: {ts_ms}"))
+        });
     }
 
     let base = Utc
         .with_ymd_and_hms(2000, 1, 1, 0, 0, 0)
         .single()
-        .ok_or_else(|| AnalysisError::invalid_bar_data(index, "failed to create synthetic base datetime"))?;
+        .ok_or_else(|| {
+            AnalysisError::invalid_bar_data(index, "failed to create synthetic base datetime")
+        })?;
 
     Ok(base + synthetic_freq_step(freq, index as i64))
 }
@@ -212,7 +215,10 @@ mod tests {
 
         let bars = build_raw_bars(&request, Freq::F30, 0, true).expect("bars");
         for (i, bar) in bars.iter().enumerate() {
-            assert_eq!(bar.vol, expected_vol[i] as f64, "vol at {i} must pass through");
+            assert_eq!(
+                bar.vol, expected_vol[i] as f64,
+                "vol at {i} must pass through"
+            );
         }
     }
 

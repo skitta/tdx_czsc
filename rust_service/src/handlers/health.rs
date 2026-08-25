@@ -3,7 +3,10 @@ use anyhow::Result;
 use crate::proto::analysis::{HealthRequest, HealthResponse, ServiceState};
 use crate::state::AppState;
 
-pub async fn handle(state: &std::sync::Arc<AppState>, _request: HealthRequest) -> Result<HealthResponse> {
+pub async fn handle(
+    state: &std::sync::Arc<AppState>,
+    _request: HealthRequest,
+) -> Result<HealthResponse> {
     let cache_entries = state.cache.read().await.len() as u32;
 
     Ok(HealthResponse {

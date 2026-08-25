@@ -22,7 +22,9 @@ pub async fn run_server(state: std::sync::Arc<AppState>) -> Result<()> {
     #[cfg(not(windows))]
     {
         let _ = state;
-        Err(anyhow!("named pipe server is only supported on Windows hosts"))
+        Err(anyhow!(
+            "named pipe server is only supported on Windows hosts"
+        ))
     }
 }
 
@@ -68,15 +70,21 @@ async fn run_windows_named_pipe_server(state: std::sync::Arc<AppState>) -> Resul
 #[cfg(windows)]
 async fn handle_client(mut server: NamedPipeServer, state: std::sync::Arc<AppState>) -> Result<()> {
     let request_bytes = read_frame(&mut server).await?;
-    let request = RequestEnvelope::decode(request_bytes.as_ref()).context("decode request failed")?;
+    let request =
+        RequestEnvelope::decode(request_bytes.as_ref()).context("decode request failed")?;
 
     // 错误已由 handlers 映射为协议状态码，这里不再需要 Err 分支。
     let response = handlers::handle_request(&state, request).await;
 
     let mut buf = Vec::with_capacity(response.encoded_len() + 4);
-    response.encode(&mut buf).context("encode response failed")?;
+    response
+        .encode(&mut buf)
+        .context("encode response failed")?;
     write_frame(&mut server, &buf).await?;
-    server.flush().await.context("flush named pipe response failed")?;
+    server
+        .flush()
+        .await
+        .context("flush named pipe response failed")?;
     Ok(())
 }
 

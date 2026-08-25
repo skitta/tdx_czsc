@@ -3,7 +3,10 @@ use anyhow::Result;
 use crate::proto::analysis::{VersionRequest, VersionResponse};
 use crate::state::AppState;
 
-pub async fn handle(state: &std::sync::Arc<AppState>, _request: VersionRequest) -> Result<VersionResponse> {
+pub async fn handle(
+    state: &std::sync::Arc<AppState>,
+    _request: VersionRequest,
+) -> Result<VersionResponse> {
     Ok(VersionResponse {
         service_version: state.config.service_version.clone(),
         protocol_version: state.config.protocol_version.clone(),

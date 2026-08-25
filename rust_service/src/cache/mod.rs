@@ -34,6 +34,10 @@ impl SnapshotCache {
         self.entries.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn get(&self, key: &CacheKey) -> Option<AnalysisSnapshot> {
         self.entries.get(key).cloned()
     }
@@ -46,10 +50,10 @@ impl SnapshotCache {
             return;
         }
 
-        if self.entries.len() >= self.capacity {
-            if let Some(oldest) = self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
+        if self.entries.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
         }
 
         self.order.push_back(key.clone());

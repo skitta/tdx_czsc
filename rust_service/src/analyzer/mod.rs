@@ -23,13 +23,13 @@ mod signals;
 mod fixtures;
 
 // 对外 API 保持原路径（`analyzer::xxx`），内部实现已按模块拆分。
+pub(crate) use channels::SUPPORTED_FUNC_IDS;
 pub use channels::build_channel;
 pub use error::AnalysisError;
 pub use pivots::build_pivots;
 pub use rawbars::{build_raw_bars, parse_freq};
 pub use segs::{Segment, build_segs};
 pub use signals::{BuySellPoint, compute_buy_sell_points};
-pub(crate) use channels::SUPPORTED_FUNC_IDS;
 
 use czsc_core::analyze::CZSC;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -286,9 +286,7 @@ fn validate_series_lengths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analyzer::fixtures::{
-        channel, nonzero_count, sample_request, test_params,
-    };
+    use crate::analyzer::fixtures::{channel, nonzero_count, sample_request, test_params};
     use crate::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 
     #[test]
@@ -515,13 +513,8 @@ mod tests {
         let request = sample_request(false);
 
         let t0 = Instant::now();
-        let bars = build_raw_bars(
-            &request,
-            czsc_core::objects::freq::Freq::F30,
-            0,
-            true,
-        )
-        .expect("bars");
+        let bars =
+            build_raw_bars(&request, czsc_core::objects::freq::Freq::F30, 0, true).expect("bars");
         let t1 = Instant::now();
         let t2 = Instant::now();
         let points = compute_buy_sell_points(&bars, 50, 3);

@@ -41,6 +41,9 @@ enum Dir {
     Down,
 }
 
+// 合并结果（对应 Vespa314 的包含判定返回值；`Combine` 变体命名与前者对齐，
+// 表示"并入当前元素"，故保留与枚举同名的变体以维持语义对照）
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Combine {
     Up,
@@ -165,16 +168,28 @@ impl Eigen {
     }
 
     /// 由前后元素判定本元素是否为分型（对应 `CKLine_Combiner::update_fx`）。
-    fn update_fx(&mut self, pre: &Eigen, next: &Eigen, exclude_included: bool, allow_top_equal: Option<i8>) {
+    fn update_fx(
+        &mut self,
+        pre: &Eigen,
+        next: &Eigen,
+        exclude_included: bool,
+        allow_top_equal: Option<i8>,
+    ) {
+        // 顶/底分型条件互斥（next.high 与 self.high 比较方向相反），折叠 if
+        // 不改变短路与赋值语义；外层 exclude_included/普通两分支保持原样。
         if exclude_included {
-            if pre.high < self.high && next.high <= self.high && next.low < self.low {
-                if allow_top_equal == Some(1) || next.high < self.high {
-                    self.fx = FxType::Top;
-                }
-            } else if next.high > self.high && pre.low > self.low && next.low >= self.low {
-                if allow_top_equal == Some(-1) || next.low > self.low {
-                    self.fx = FxType::Bottom;
-                }
+            if pre.high < self.high
+                && next.high <= self.high
+                && next.low < self.low
+                && (allow_top_equal == Some(1) || next.high < self.high)
+            {
+                self.fx = FxType::Top;
+            } else if next.high > self.high
+                && pre.low > self.low
+                && next.low >= self.low
+                && (allow_top_equal == Some(-1) || next.low > self.low)
+            {
+                self.fx = FxType::Bottom;
             }
         } else if pre.high < self.high
             && next.high < self.high
@@ -260,10 +275,11 @@ impl EigenFX {
     }
 
     fn treat_second_ele(&mut self, bi_idx: usize, bis: &[BI]) -> bool {
-        let combine_dir = self.ele[0]
-            .as_mut()
-            .unwrap()
-            .try_add(bi_idx, bis, self.exclude_included, None);
+        let combine_dir =
+            self.ele[0]
+                .as_mut()
+                .unwrap()
+                .try_add(bi_idx, bis, self.exclude_included, None);
         if combine_dir != Combine::Combine {
             let e1 = Eigen::new(bi_idx, bis, self.dir);
             // 前两元素不可能成为分型：向上线段第二元素高点不高于第一元素高点
@@ -287,10 +303,12 @@ impl EigenFX {
         } else {
             None
         };
-        let combine_dir = self.ele[1]
-            .as_mut()
-            .unwrap()
-            .try_add(bi_idx, bis, self.exclude_included, allow_top_equal);
+        let combine_dir = self.ele[1].as_mut().unwrap().try_add(
+            bi_idx,
+            bis,
+            self.exclude_included,
+            allow_top_equal,
+        );
         if combine_dir == Combine::Combine {
             return false;
         }
@@ -310,11 +328,7 @@ impl EigenFX {
         mid.update_fx(&pre, &next, self.exclude_included, allow_top_equal);
         let fx = mid.fx;
         let is_fx = (self.is_up() && fx == FxType::Top) || (!self.is_up() && fx == FxType::Bottom);
-        if is_fx {
-            true
-        } else {
-            self.reset(bis)
-        }
+        if is_fx { true } else { self.reset(bis) }
     }
 
     /// 第三元素必须"实际突破"才构成分型（防止第二元素因合并导致后面没有实际突破）。
@@ -364,7 +378,10 @@ impl EigenFX {
             self.ele[0] = e0;
             self.ele[1] = e1;
             self.ele[2] = None;
-            self.lst = bi_tmp_list.into_iter().filter(|&i| i >= ele2_begin).collect();
+            self.lst = bi_tmp_list
+                .into_iter()
+                .filter(|&i| i >= ele2_begin)
+                .collect();
         }
         false
     }
@@ -458,14 +475,18 @@ fn cal_seg_sure(bis: &[BI], begin_idx: usize, segs: &mut Vec<Segment>) {
     while i < bis.len() {
         let bi = &bis[i];
         let mut hit: Option<Dir> = None;
-        if bi.direction == CzscDirection::Down && last_seg_dir != Some(Dir::Up) {
-            if up_eigen.add(i, bis) {
-                hit = Some(Dir::Up);
-            }
-        } else if bi.direction == CzscDirection::Up && last_seg_dir != Some(Dir::Down) {
-            if down_eigen.add(i, bis) {
-                hit = Some(Dir::Down);
-            }
+        // 两分支方向条件（Down/Up）互斥，add 只在匹配分支被调用，
+        // 折叠 if 不改变短路与特征序列推进语义
+        if bi.direction == CzscDirection::Down
+            && last_seg_dir != Some(Dir::Up)
+            && up_eigen.add(i, bis)
+        {
+            hit = Some(Dir::Up);
+        } else if bi.direction == CzscDirection::Up
+            && last_seg_dir != Some(Dir::Down)
+            && down_eigen.add(i, bis)
+        {
+            hit = Some(Dir::Down);
         }
 
         // 第一段方向确定：不要以谁先成为分型来决定（反例：US.EVRG）。
@@ -479,15 +500,14 @@ fn cal_seg_sure(bis: &[BI], begin_idx: usize, segs: &mut Vec<Segment>) {
                 up_eigen.clear();
                 last_seg_dir = Some(Dir::Up);
             }
-            if up_eigen.ele[1].is_none()
+            // 两个分支都只做"解预判"且条件互斥，合并为单一条件
+            let retract = (up_eigen.ele[1].is_none()
                 && last_seg_dir == Some(Dir::Down)
-                && bi.direction == CzscDirection::Down
-            {
-                last_seg_dir = None;
-            } else if down_eigen.ele[1].is_none()
-                && last_seg_dir == Some(Dir::Up)
-                && bi.direction == CzscDirection::Up
-            {
+                && bi.direction == CzscDirection::Down)
+                || (down_eigen.ele[1].is_none()
+                    && last_seg_dir == Some(Dir::Up)
+                    && bi.direction == CzscDirection::Up);
+            if retract {
                 last_seg_dir = None;
             }
         }
@@ -615,8 +635,14 @@ fn collect_first_seg(bis: &[BI], segs: &mut Vec<Segment>) {
     if bis.len() < 3 {
         return;
     }
-    let high = bis.iter().map(|b| b.get_high()).fold(f64::NEG_INFINITY, f64::max);
-    let low = bis.iter().map(|b| b.get_low()).fold(f64::INFINITY, f64::min);
+    let high = bis
+        .iter()
+        .map(|b| b.get_high())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let low = bis
+        .iter()
+        .map(|b| b.get_low())
+        .fold(f64::INFINITY, f64::min);
     let begin_val = bis[0].fx_a.fx;
     if (high - begin_val).abs() >= (low - begin_val).abs() {
         if let Some(peak) = find_peak_bi(bis, 0, bis.len(), true) {
@@ -656,10 +682,16 @@ fn collect_segs(bis: &[BI], segs: &mut Vec<Segment>) {
 fn collect_left_seg_peak_method(bis: &[BI], last_seg_end: usize, segs: &mut Vec<Segment>) {
     let last_dir = segs.last().unwrap().direction;
     let is_high = last_dir == CzscDirection::Down;
-    if let Some(peak) = find_peak_bi(bis, last_seg_end + 3, bis.len(), is_high) {
-        if peak - last_seg_end >= 3 {
-            try_add_new_seg(bis, peak, false, Some(if is_high { Dir::Up } else { Dir::Down }), segs);
-        }
+    if let Some(peak) = find_peak_bi(bis, last_seg_end + 3, bis.len(), is_high)
+        && peak - last_seg_end >= 3
+    {
+        try_add_new_seg(
+            bis,
+            peak,
+            false,
+            Some(if is_high { Dir::Up } else { Dir::Down }),
+            segs,
+        );
     }
     collect_left_as_seg(bis, segs);
 }
@@ -682,7 +714,11 @@ fn collect_left_as_seg(bis: &[BI], segs: &mut Vec<Segment>) {
 /// 在 `[start, end)` 内正向找"峰值笔"（对应 `FindPeakBi`）：
 /// is_high=true 找向上笔中终点最高者（跳过其前前笔终点更高的非峰值笔）。
 fn find_peak_bi(bis: &[BI], start: usize, end: usize, is_high: bool) -> Option<usize> {
-    let mut peak_val = if is_high { f64::NEG_INFINITY } else { f64::INFINITY };
+    let mut peak_val = if is_high {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
     let mut peak_bi = None;
     for i in start..end {
         let bi = &bis[i];
@@ -710,7 +746,11 @@ fn find_peak_bi(bis: &[BI], start: usize, end: usize, is_high: bool) -> Option<u
 
 /// 在 `[0..=max_idx]` 内反向找"峰值笔"（split_first_seg 用）。
 fn find_peak_bi_rev(bis: &[BI], max_idx: usize, is_high: bool) -> Option<usize> {
-    let mut peak_val = if is_high { f64::NEG_INFINITY } else { f64::INFINITY };
+    let mut peak_val = if is_high {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
     let mut peak_bi = None;
     let mut i = max_idx;
     loop {

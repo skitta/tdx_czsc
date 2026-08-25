@@ -55,8 +55,8 @@ mod tests {
 
     #[test]
     fn downcast_through_anyhow_context() {
-        let any: anyhow::Error = anyhow::anyhow!(AnalysisError::UnsupportedFreq("X9".into()))
-            .context("analysis failed");
+        let any: anyhow::Error =
+            anyhow::anyhow!(AnalysisError::UnsupportedFreq("X9".into())).context("analysis failed");
         assert_eq!(
             any.downcast_ref::<AnalysisError>(),
             Some(&AnalysisError::UnsupportedFreq("X9".into()))

@@ -129,27 +129,18 @@ const SIGNAL_SPECS: [SignalSpec; 6] = [
 /// - 信号为状态型分类，同一信号段（连续保持同一命中）只标记一次；
 /// - 同一锚点上多个信号同时命中时，只保留优先级最高的一个（func_id 最小，
 ///   一买 > 一卖 > 二买 > 二卖 > 三买 > 三卖）。
+///
 /// 缠论买卖点关联状态：
 /// - 二买/二卖（403/404）必须依附最近的一买/一卖，且为一买/一卖后的**首个**
 ///   回调/反弹确认点（每个 一买/一卖 结构内最多一个）；
 /// - 三买/三卖（405/406）另由 `strictize_third_bs_by_zs` 按中枢去重
 ///   （每个中枢最多一个三买或三卖）。
+#[derive(Default)]
 struct BuySellState {
     last_buy1: Option<usize>,
     last_sell1: Option<usize>,
     last_buy2: Option<usize>,
     last_sell2: Option<usize>,
-}
-
-impl Default for BuySellState {
-    fn default() -> Self {
-        Self {
-            last_buy1: None,
-            last_sell1: None,
-            last_buy2: None,
-            last_sell2: None,
-        }
-    }
 }
 
 impl BuySellState {
@@ -160,8 +151,8 @@ impl BuySellState {
             403 => match self.last_buy1 {
                 Some(b1) => {
                     anchor > b1
-                        && self.last_sell1.map_or(true, |s| s < b1)
-                        && self.last_buy2.map_or(true, |b2| b2 < b1)
+                        && self.last_sell1.is_none_or(|s| s < b1)
+                        && self.last_buy2.is_none_or(|b2| b2 < b1)
                 }
                 None => false,
             },
@@ -169,8 +160,8 @@ impl BuySellState {
             404 => match self.last_sell1 {
                 Some(s1) => {
                     anchor > s1
-                        && self.last_buy1.map_or(true, |b| b < s1)
-                        && self.last_sell2.map_or(true, |s2| s2 < s1)
+                        && self.last_buy1.is_none_or(|b| b < s1)
+                        && self.last_sell2.is_none_or(|s2| s2 < s1)
                 }
                 None => false,
             },

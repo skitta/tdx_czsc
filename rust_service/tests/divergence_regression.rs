@@ -29,12 +29,11 @@ use czsc_signals::types::TaCache;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use tdx_czsc_service::analyzer::{build_snapshot, compute_buy_sell_points, AnalysisParams};
-use tdx_czsc_service::config::AppConfig;
+use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot, compute_buy_sell_points};
 use tdx_czsc_service::state::AppState;
 
 mod common;
-use common::analyze_request;
+use common::{analyze_request, config_for};
 
 // ---------------------------------------------------------------------------
 // 合成行情构造
@@ -63,12 +62,12 @@ pub fn build_zigzag(
         .expect("base dt");
 
     let push = |open: f64,
-                    close: f64,
-                    high: f64,
-                    low: f64,
-                    vol: f64,
-                    bars: &mut Vec<RawBar>,
-                    id: &mut i32| {
+                close: f64,
+                high: f64,
+                low: f64,
+                vol: f64,
+                bars: &mut Vec<RawBar>,
+                id: &mut i32| {
         let bar = RawBarBuilder::default()
             .symbol("SYN")
             .dt(base + chrono::Duration::days(*id as i64))
@@ -91,14 +90,46 @@ pub fn build_zigzag(
     let apex = first_seg.0;
     if s0 > 0.0 {
         // 首段下行：前奏形成起点顶分型（bar1 为中间元素、全局最高）
-        push(apex - 0.5, apex - 0.5, apex - 0.1, apex - 1.6, 0.0, &mut bars, &mut id);
+        push(
+            apex - 0.5,
+            apex - 0.5,
+            apex - 0.1,
+            apex - 1.6,
+            0.0,
+            &mut bars,
+            &mut id,
+        );
         push(apex, apex, apex + 2.0, apex - 0.7, 0.0, &mut bars, &mut id);
-        push(apex, apex - s0 * 2.0, apex - 1.0, apex - s0 * 2.0 - 0.5, 0.0, &mut bars, &mut id);
+        push(
+            apex,
+            apex - s0 * 2.0,
+            apex - 1.0,
+            apex - s0 * 2.0 - 0.5,
+            0.0,
+            &mut bars,
+            &mut id,
+        );
     } else {
         // 首段上行：前奏形成起点底分型（bar1 全局最低）
-        push(apex + 0.5, apex + 0.5, apex + 1.6, apex + 0.1, 0.0, &mut bars, &mut id);
+        push(
+            apex + 0.5,
+            apex + 0.5,
+            apex + 1.6,
+            apex + 0.1,
+            0.0,
+            &mut bars,
+            &mut id,
+        );
         push(apex, apex, apex + 0.7, apex - 2.0, 0.0, &mut bars, &mut id);
-        push(apex, apex - s0.abs() * 2.0, apex - s0.abs() * 2.0 + 0.5, apex + 1.0, 0.0, &mut bars, &mut id);
+        push(
+            apex,
+            apex - s0.abs() * 2.0,
+            apex - s0.abs() * 2.0 + 0.5,
+            apex + 1.0,
+            0.0,
+            &mut bars,
+            &mut id,
+        );
     }
 
     let mut prev_close = apex;
@@ -136,7 +167,15 @@ pub fn build_zigzag(
             let close = ts + step * (j + 1) as f64;
             let open = prev_close;
             let w = 0.15 * step.abs();
-            push(open, close, open.max(close) + w, open.min(close) - w, tv, &mut bars, &mut id);
+            push(
+                open,
+                close,
+                open.max(close) + w,
+                open.min(close) - w,
+                tv,
+                &mut bars,
+                &mut id,
+            );
             prev_close = close;
         }
     }
@@ -195,10 +234,21 @@ fn assert_zigzag_structure(czsc: &CZSC, expected_dir: Direction) {
         })
         .collect();
     let actual: Vec<Direction> = bis.iter().map(|b| b.direction).collect();
-    assert_eq!(actual, expected, "direction sequence: {}", describe_bis(bis));
+    assert_eq!(
+        actual,
+        expected,
+        "direction sequence: {}",
+        describe_bis(bis)
+    );
 
-    let max_high = bis.iter().map(|b| b.get_high()).fold(f64::NEG_INFINITY, f64::max);
-    let min_low = bis.iter().map(|b| b.get_low()).fold(f64::INFINITY, f64::min);
+    let max_high = bis
+        .iter()
+        .map(|b| b.get_high())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_low = bis
+        .iter()
+        .map(|b| b.get_low())
+        .fold(f64::INFINITY, f64::min);
     match expected_dir {
         Direction::Down => {
             assert_eq!(bis[0].get_high(), max_high, "首笔必须含全局最高点");
@@ -231,7 +281,12 @@ fn first_buy_zigzag() -> Vec<RawBar> {
     ];
     let bars_per_seg = [7usize; 7];
     let vol_per_seg = [900.0, 900.0, 800.0, 800.0, 700.0, 700.0, 100.0];
-    build_zigzag(&segments, &bars_per_seg, &vol_per_seg, Some((20.0, 26.0, 50.0)))
+    build_zigzag(
+        &segments,
+        &bars_per_seg,
+        &vol_per_seg,
+        Some((20.0, 26.0, 50.0)),
+    )
 }
 
 /// 末笔结束分型（底分型）极值K线索引：前奏3 + 前6段×7 + 末段前6根 = 51。
@@ -269,7 +324,10 @@ fn first_buy_detected_on_synthetic_downtrend() {
         "真实量路径应产出 401 点；points={:#?}",
         points
     );
-    println!("401 锚点: {:?}", buy1s.iter().map(|p| p.index).collect::<Vec<_>>());
+    println!(
+        "401 锚点: {:?}",
+        buy1s.iter().map(|p| p.index).collect::<Vec<_>>()
+    );
     assert!(
         buy1s.iter().any(|p| p.index == anchor),
         "末段力度最弱，必须存在锚在末笔底分型极值K线（idx={anchor}）的 401 点"
@@ -280,10 +338,7 @@ fn first_buy_detected_on_synthetic_downtrend() {
 fn first_buy_channel_via_proxy_on_synthetic_downtrend() {
     // 4) 项目接入层（代理量路径：vol 缺失 + derive_volume_proxy=true）
     let bars = first_buy_zigzag();
-    let mut config = AppConfig::default();
-    config.min_bi_len = MIN_BI_LEN as u32;
-    config.default_analysis_window = bars.len() as u32;
-    let state = AppState::new(config);
+    let state = AppState::new(config_for(MIN_BI_LEN as u32, bars.len() as u32));
 
     let high: Vec<f32> = bars.iter().map(|b| b.high as f32).collect();
     let low: Vec<f32> = bars.iter().map(|b| b.low as f32).collect();
@@ -343,7 +398,12 @@ fn first_sell_detected_on_synthetic_uptrend() {
     ];
     let vol_per_seg = [900.0, 900.0, 800.0, 800.0, 700.0, 700.0, 100.0];
     let bars_per_seg = [7usize, 7, 7, 7, 7, 7, 20];
-    let bars = build_zigzag(&segments, &bars_per_seg, &vol_per_seg, Some((150.0, 144.0, 50.0)));
+    let bars = build_zigzag(
+        &segments,
+        &bars_per_seg,
+        &vol_per_seg,
+        Some((150.0, 144.0, 50.0)),
+    );
 
     let czsc = CZSC::new(bars.clone(), 50, MIN_BI_LEN);
     assert_zigzag_structure(&czsc, Direction::Up);
@@ -357,7 +417,11 @@ fn first_sell_detected_on_synthetic_uptrend() {
 
     let points = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
     let sell1 = points.iter().find(|p| p.func_id == 402);
-    assert!(sell1.is_some(), "真实量路径应产出 402 点；points={:#?}", points);
+    assert!(
+        sell1.is_some(),
+        "真实量路径应产出 402 点；points={:#?}",
+        points
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +445,12 @@ fn no_first_buy_when_volume_not_weaker() {
     // 末段 20 根：长度（≈22）超过关键笔均值（≈10-11）→ 长度背驰也不成立，
     // 与量能一起隔离（验证背驰判定确实需要价格之外的"量能 OR 长度"维度）。
     let bars_per_seg = [7usize, 7, 7, 7, 7, 7, 20];
-    let bars = build_zigzag(&segments, &bars_per_seg, &vol_per_seg, Some((20.0, 26.0, 50.0)));
+    let bars = build_zigzag(
+        &segments,
+        &bars_per_seg,
+        &vol_per_seg,
+        Some((20.0, 26.0, 50.0)),
+    );
 
     let czsc = CZSC::new(bars, 50, MIN_BI_LEN);
     assert_zigzag_structure(&czsc, Direction::Down);
@@ -419,14 +488,22 @@ fn no_first_buy_when_low_not_broken() {
     ];
     let vol_per_seg = [800.0, 800.0, 800.0, 800.0, 800.0, 800.0, 100.0];
     let bars_per_seg = [7usize, 7, 7, 7, 7, 7, 7];
-    let bars = build_zigzag(&segments, &bars_per_seg, &vol_per_seg, Some((55.0, 60.0, 50.0)));
+    let bars = build_zigzag(
+        &segments,
+        &bars_per_seg,
+        &vol_per_seg,
+        Some((55.0, 60.0, 50.0)),
+    );
 
     let czsc = CZSC::new(bars, 50, MIN_BI_LEN);
     // 哨兵：结构仍为 7 笔 DUDUDUD，但末笔低点必须不再是全局最低
     // （段4 低点 70 与段2 低点 40 均低于段6 终点 55）→ 结构条件不成立。
     let bis = &czsc.bi_list;
     assert_eq!(bis.len(), 7, "bi structure: {}", describe_bis(bis));
-    let min_low = bis.iter().map(|b| b.get_low()).fold(f64::INFINITY, f64::min);
+    let min_low = bis
+        .iter()
+        .map(|b| b.get_low())
+        .fold(f64::INFINITY, f64::min);
     assert!(
         bis[6].get_low() > min_low,
         "末笔必须未创新低（全局最低点应位于更早的向下笔）"

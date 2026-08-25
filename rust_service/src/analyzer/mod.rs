@@ -12,6 +12,7 @@
 //! - [`objects`]：分型/笔/中枢/段 → proto 对象映射与 K 线下标对齐。
 
 mod channels;
+mod error;
 mod objects;
 mod pivots;
 mod rawbars;
@@ -23,12 +24,12 @@ mod fixtures;
 
 // 对外 API 保持原路径（`analyzer::xxx`），内部实现已按模块拆分。
 pub use channels::build_channel;
+pub use error::AnalysisError;
 pub use pivots::build_pivots;
 pub use rawbars::{build_raw_bars, parse_freq};
 pub use segs::{Segment, build_segs};
 pub use signals::{BuySellPoint, compute_buy_sell_points};
 
-use anyhow::{Result, anyhow, bail};
 use czsc_core::analyze::CZSC;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -95,13 +96,13 @@ impl From<(&AnalyzeRequest, &AppConfig)> for AnalysisParams {
 pub fn build_snapshot(
     request: &AnalyzeRequest,
     params: &AnalysisParams,
-) -> Result<AnalysisSnapshot> {
+) -> Result<AnalysisSnapshot, AnalysisError> {
     let options = request.options.as_ref();
     let data_len = request.data_len as usize;
     let series = request
         .series
         .as_ref()
-        .ok_or_else(|| anyhow!("market series is missing"))?;
+        .ok_or_else(|| AnalysisError::invalid_request("market series is missing"))?;
 
     validate_series_lengths(request.data_len, series)?;
 
@@ -121,7 +122,9 @@ pub fn build_snapshot(
     let bars = build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
 
     if bars.is_empty() {
-        bail!("bars are empty after applying analysis window");
+        return Err(AnalysisError::invalid_request(
+            "bars are empty after applying analysis window",
+        ));
     }
 
     let max_bi_num = options
@@ -165,11 +168,11 @@ pub fn build_snapshot(
                 &buy_sell_points,
             )
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, AnalysisError>>()?;
 
     let generated_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| anyhow!(e))?
+        .map_err(|e| AnalysisError::invalid_request(e.to_string()))?
         .as_millis() as u64;
 
     let include_objects = options.map(|x| x.include_objects).unwrap_or(false);
@@ -242,21 +245,23 @@ pub fn build_snapshot(
 fn validate_series_lengths(
     data_len: u32,
     series: &crate::proto::analysis::MarketSeries,
-) -> Result<()> {
+) -> Result<(), AnalysisError> {
     let expected = data_len as usize;
 
-    let check = |name: &str, values: &[f32], required: bool| -> Result<()> {
+    let check = |name: &str, values: &[f32], required: bool| -> Result<(), AnalysisError> {
         if values.is_empty() {
             if required {
-                bail!("required series {name} is empty");
+                return Err(AnalysisError::invalid_request(format!(
+                    "required series {name} is empty"
+                )));
             }
             return Ok(());
         }
         if values.len() != expected {
-            bail!(
+            return Err(AnalysisError::invalid_request(format!(
                 "series {name} length {} != data_len {expected}",
                 values.len()
-            );
+            )));
         }
         Ok(())
     };
@@ -268,10 +273,10 @@ fn validate_series_lengths(
     check("vol", &series.vol, false)?;
     check("amount", &series.amount, false)?;
     if !series.dt_unix_ms.is_empty() && series.dt_unix_ms.len() != expected {
-        bail!(
+        return Err(AnalysisError::invalid_request(format!(
             "series dt_unix_ms length {} != data_len {expected}",
             series.dt_unix_ms.len()
-        );
+        )));
     }
 
     Ok(())

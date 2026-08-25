@@ -13,6 +13,7 @@ czsc-core = "1"
 czsc-signals = "1.0.1"
 prost = "0.13"
 serde_json = "1"
+thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "net", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

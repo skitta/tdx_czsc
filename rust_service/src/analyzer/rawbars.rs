@@ -4,26 +4,26 @@
 //! `RawBar` 序列（`build_raw_bars`）、量能三级来源链（真实 vol / 振幅代理
 //! / 0）、时间轴解析（真实 `dt_unix_ms` 或按频率合成）。
 
-use anyhow::{Result, anyhow};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use czsc_core::objects::bar::{RawBar, RawBarBuilder};
 use czsc_core::objects::freq::Freq;
 use std::str::FromStr;
 
+use crate::analyzer::error::AnalysisError;
 use crate::proto::analysis::{AnalyzeRequest, MarketSeries};
 
 /// 解析通达信/调用方传入的周期提示字符串。
 ///
 /// 空串回退到 30 分钟；支持形如 `D`、`1d`、`30m`、`F30` 等别名
 /// （`normalize_freq_hint` 转中文名后再交给 czsc 解析）。
-pub fn parse_freq(freq_hint: &str) -> Result<Freq> {
+pub fn parse_freq(freq_hint: &str) -> Result<Freq, AnalysisError> {
     if freq_hint.is_empty() {
         return Ok(Freq::F30);
     }
 
     Freq::from_str(freq_hint)
         .or_else(|_| Freq::from_str(&normalize_freq_hint(freq_hint)))
-        .map_err(|_| anyhow!("unsupported freq_hint: {freq_hint}"))
+        .map_err(|_| AnalysisError::UnsupportedFreq(freq_hint.to_string()))
 }
 
 fn normalize_freq_hint(freq_hint: &str) -> String {
@@ -48,11 +48,11 @@ pub fn build_raw_bars(
     freq: Freq,
     window_start: usize,
     derive_volume_proxy: bool,
-) -> Result<Vec<RawBar>> {
+) -> Result<Vec<RawBar>, AnalysisError> {
     let series = request
         .series
         .as_ref()
-        .ok_or_else(|| anyhow!("market series is missing"))?;
+        .ok_or_else(|| AnalysisError::invalid_request("market series is missing"))?;
 
     let symbol = if request.symbol_hint.is_empty() {
         "TDX".to_string()
@@ -93,7 +93,7 @@ pub fn build_raw_bars(
             .vol(vol)
             .amount(amount)
             .build()
-            .map_err(|e| anyhow!("failed to build raw bar at index {i}: {e}"))?;
+            .map_err(|e| AnalysisError::invalid_bar_data(i, e.to_string()))?;
 
         bars.push(bar);
     }
@@ -115,18 +115,20 @@ fn amplitude_proxy_vol(series: &MarketSeries, index: usize) -> f64 {
     (amplitude / close * 100.0).max(0.0)
 }
 
-fn resolve_bar_datetime(index: usize, provided: &[i64], freq: Freq) -> Result<DateTime<Utc>> {
+fn resolve_bar_datetime(index: usize, provided: &[i64], freq: Freq) -> Result<DateTime<Utc>, AnalysisError> {
     if let Some(ts_ms) = provided.get(index) {
         return Utc
             .timestamp_millis_opt(*ts_ms)
             .single()
-            .ok_or_else(|| anyhow!("invalid dt_unix_ms at index {index}: {ts_ms}"));
+            .ok_or_else(|| {
+                AnalysisError::invalid_bar_data(index, format!("invalid dt_unix_ms: {ts_ms}"))
+            });
     }
 
     let base = Utc
         .with_ymd_and_hms(2000, 1, 1, 0, 0, 0)
         .single()
-        .ok_or_else(|| anyhow!("failed to create synthetic base datetime"))?;
+        .ok_or_else(|| AnalysisError::invalid_bar_data(index, "failed to create synthetic base datetime"))?;
 
     Ok(base + synthetic_freq_step(freq, index as i64))
 }

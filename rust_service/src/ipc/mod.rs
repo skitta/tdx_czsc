@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use prost::Message;
 
 use crate::handlers;
-use crate::proto::analysis::{RequestEnvelope, StatusCode};
+use crate::proto::analysis::RequestEnvelope;
 use crate::state::AppState;
 
 #[cfg(windows)]
@@ -69,17 +69,9 @@ async fn run_windows_named_pipe_server(state: std::sync::Arc<AppState>) -> Resul
 async fn handle_client(mut server: NamedPipeServer, state: std::sync::Arc<AppState>) -> Result<()> {
     let request_bytes = read_frame(&mut server).await?;
     let request = RequestEnvelope::decode(request_bytes.as_ref()).context("decode request failed")?;
-    let request_id = request.request_id;
 
-    let response = match handlers::handle_request(&state, request).await {
-        Ok(resp) => resp,
-        Err(err) => handlers::build_error_response(
-            &state,
-            request_id,
-            StatusCode::StatusInternalError,
-            err.to_string(),
-        ),
-    };
+    // 错误已由 handlers 映射为协议状态码，这里不再需要 Err 分支。
+    let response = handlers::handle_request(&state, request).await;
 
     let mut buf = Vec::with_capacity(response.encoded_len() + 4);
     response.encode(&mut buf).context("encode response failed")?;

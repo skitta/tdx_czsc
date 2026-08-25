@@ -3146,6 +3146,7 @@ dependencies = [
  "prost",
  "prost-build",
  "serde_json",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -163,7 +163,7 @@ pub async fn handle(
     let analyze_state = state.clone();
     let analyze = tokio::task::spawn_blocking(move || -> Result<_> {
         let params = analyzer::AnalysisParams::from((&analyze_request, &analyze_state.config));
-        analyzer::build_snapshot(&analyze_request, &params)
+        Ok(analyzer::build_snapshot(&analyze_request, &params)?)
     })
     .await
     .map_err(|err| anyhow!("analysis task join failed: {err}"))?;

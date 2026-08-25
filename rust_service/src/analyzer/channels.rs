@@ -4,13 +4,13 @@
 //! 再按 func_id 分派到对应填充器。分型/笔/中枢/段/信号各通道的填充器
 //! 只做"对象 → 价格/方向值"的写入，不承担算法逻辑。
 
-use anyhow::{Result, anyhow};
 use czsc_core::objects::bi::BI;
 use czsc_core::objects::direction::Direction as CzscDirection;
 use czsc_core::objects::fx::FX;
 use czsc_core::objects::mark::Mark;
 use czsc_core::objects::zs::ZS;
 
+use super::error::AnalysisError;
 use super::objects::{fx_mid_index, zs_span};
 use super::segs::Segment;
 use super::signals::BuySellPoint;
@@ -25,7 +25,7 @@ pub fn build_channel(
     pivots: &[ZS],
     segs: &[Segment],
     buy_sell_points: &[BuySellPoint],
-) -> Result<ChannelSeries> {
+) -> Result<ChannelSeries, AnalysisError> {
     let (kind, name) = resolve_channel_meta(func_id)?;
     let mut values = vec![0.0; data_len];
 
@@ -42,7 +42,7 @@ pub fn build_channel(
         304 => fill_zs_boundary_channel(&mut values, pivots),
         401..=406 => fill_signal_channel(&mut values, buy_sell_points, func_id),
         901..=903 => {}
-        _ => return Err(anyhow!("unsupported func_id: {func_id}")),
+        _ => return Err(unsupported_func_id(func_id)),
     }
 
     Ok(ChannelSeries {
@@ -53,11 +53,15 @@ pub fn build_channel(
     })
 }
 
+fn unsupported_func_id(func_id: u32) -> AnalysisError {
+    AnalysisError::invalid_request(format!("unsupported func_id: {func_id}"))
+}
+
 /// 通道元数据单一映射表：func_id → (ChannelKind, 通道名)。
 ///
 /// `handlers/version.rs` 的 supported_func_ids 与 DLL 侧约定都以这里为准，
 /// 新增通道只需改这一处。
-fn resolve_channel_meta(func_id: u32) -> Result<(i32, &'static str)> {
+fn resolve_channel_meta(func_id: u32) -> Result<(i32, &'static str), AnalysisError> {
     let kind = match func_id {
         101 => (ChannelKind::ChannelFxTop as i32, "fx_top"),
         102 => (ChannelKind::ChannelFxBottom as i32, "fx_bottom"),
@@ -84,7 +88,7 @@ fn resolve_channel_meta(func_id: u32) -> Result<(i32, &'static str)> {
             ChannelKind::ChannelDebugLatencyMs as i32,
             "debug_latency_ms",
         ),
-        _ => return Err(anyhow!("unsupported func_id: {func_id}")),
+        _ => return Err(unsupported_func_id(func_id)),
     };
 
     Ok(kind)

@@ -13,6 +13,9 @@ use czsc_core::objects::freq::Freq;
 use std::collections::HashSet;
 use tdx_czsc_service::analyzer::compute_buy_sell_points;
 
+mod common;
+use common::{analyze_request, load_series};
+
 fn load_bars(path: &str, window_start: usize) -> Vec<czsc_core::objects::bar::RawBar> {
     let csv = std::fs::read_to_string(path).expect("read csv");
     let mut bars = Vec::new();
@@ -128,51 +131,20 @@ fn second_bs_attached_to_first_bs() {
 fn third_bs_capped_per_pivot() {
     use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
     use tdx_czsc_service::config::AppConfig;
-    use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
     use tdx_czsc_service::state::AppState;
 
-    let csv = std::fs::read_to_string("../tests/data/002340_day.csv").expect("read csv");
-    let mut high = Vec::new();
-    let mut low = Vec::new();
-    let mut close = Vec::new();
-    for line in csv.lines().skip(1) {
-        let p: Vec<&str> = line.split(',').collect();
-        if p.len() < 5 {
-            continue;
-        }
-        high.push(p[2].parse::<f32>().unwrap());
-        low.push(p[3].parse::<f32>().unwrap());
-        close.push(p[4].parse::<f32>().unwrap());
-    }
-    let data_len = high.len() as u32;
-    let request = AnalyzeRequest {
-        func_group: "single_level_structure".to_string(),
-        requested_func_ids: vec![401, 402, 403, 404, 405, 406],
-        symbol_hint: "002340.SZ".to_string(),
-        freq_hint: "D".to_string(),
-        data_len,
-        input_hash: 0,
-        bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
-        series: Some(MarketSeries {
-            open: Vec::new(),
-            high,
-            low,
-            close,
-            vol: Vec::new(),
-            amount: Vec::new(),
-            dt_unix_ms: Vec::new(),
-        }),
-        options: Some(CzscOptions {
-            max_bi_num: 50,
-            min_bi_len: 6,
-            analysis_window: 1000,
-            include_channels: true,
-            include_objects: true,
-            enable_incremental: false,
-        }),
-        prefer_cached: false,
-        caller_instance_id: 7,
-    };
+    let (_, high, low, close) = load_series("../tests/data/002340_day.csv");
+    let request = analyze_request(
+        "002340.SZ",
+        vec![401, 402, 403, 404, 405, 406],
+        "D",
+        high,
+        low,
+        close,
+        6,
+        1000,
+        true,
+    );
     let mut config = AppConfig::default();
     config.min_bi_len = 6;
     config.default_analysis_window = 1000;

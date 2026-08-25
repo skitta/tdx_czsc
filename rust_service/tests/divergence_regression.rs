@@ -31,8 +31,10 @@ use std::collections::HashMap;
 
 use tdx_czsc_service::analyzer::{build_snapshot, compute_buy_sell_points, AnalysisParams};
 use tdx_czsc_service::config::AppConfig;
-use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
+
+mod common;
+use common::analyze_request;
 
 // ---------------------------------------------------------------------------
 // 合成行情构造
@@ -286,35 +288,17 @@ fn first_buy_channel_via_proxy_on_synthetic_downtrend() {
     let high: Vec<f32> = bars.iter().map(|b| b.high as f32).collect();
     let low: Vec<f32> = bars.iter().map(|b| b.low as f32).collect();
     let close: Vec<f32> = bars.iter().map(|b| b.close as f32).collect();
-    let request = AnalyzeRequest {
-        func_group: "single_level_structure".to_string(),
-        requested_func_ids: vec![401],
-        symbol_hint: "SYN".to_string(),
-        freq_hint: "D".to_string(),
-        data_len: bars.len() as u32,
-        input_hash: 0xDEAD_BEEF,
-        bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3
-            as i32,
-        series: Some(MarketSeries {
-            open: Vec::new(),
-            high,
-            low,
-            close,
-            vol: Vec::new(), // 空 vol → 代理量
-            amount: Vec::new(),
-            dt_unix_ms: Vec::new(),
-        }),
-        options: Some(CzscOptions {
-            max_bi_num: 50,
-            min_bi_len: MIN_BI_LEN as u32,
-            analysis_window: bars.len() as u32,
-            include_channels: true,
-            include_objects: true,
-            enable_incremental: false,
-        }),
-        prefer_cached: false,
-        caller_instance_id: 1,
-    };
+    let request = analyze_request(
+        "SYN",
+        vec![401],
+        "D",
+        high,
+        low,
+        close,
+        MIN_BI_LEN as u32,
+        bars.len() as u32,
+        true,
+    );
 
     let params = AnalysisParams::from((&request, &state.config));
     let snapshot = build_snapshot(&request, &params).expect("snapshot");

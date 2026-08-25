@@ -29,6 +29,7 @@ pub use pivots::build_pivots;
 pub use rawbars::{build_raw_bars, parse_freq};
 pub use segs::{Segment, build_segs};
 pub use signals::{BuySellPoint, compute_buy_sell_points};
+pub(crate) use channels::SUPPORTED_FUNC_IDS;
 
 use czsc_core::analyze::CZSC;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -494,6 +495,14 @@ mod tests {
             println!("ZS holes(不连续): {holes:?}");
             println!("ZS 每根bar值: {:?}", &zsu.values[*first..=*last]);
             println!("ZL 每根bar值: {:?}", &zsl.values[*first..=*last]);
+            // 关键断言：中枢区间必须连续且与上下沿同时存在
+            assert!(holes.is_empty(), "中枢填充不得出现空洞: {holes:?}");
+            assert!(
+                zsl.values[*first..=*last]
+                    .iter()
+                    .any(|v| v.abs() > f32::EPSILON),
+                "中枢下沿应与上沿同时覆盖"
+            );
         } else {
             println!("ZS 无区间");
         }

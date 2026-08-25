@@ -11,6 +11,7 @@ use crate::proto::analysis::response_envelope::Body as ResponseBody;
 use crate::state::AppState;
 
 pub mod analyze;
+mod debug;
 pub mod health;
 pub mod version;
 

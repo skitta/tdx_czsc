@@ -4,9 +4,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 
+use super::debug::{patch_debug_channels, timing_stats};
 use crate::analyzer;
 use crate::cache::CacheKey;
-use crate::proto::analysis::{AnalyzeRequest, AnalyzeResponse, ChannelSeries, TimingStats};
+use crate::proto::analysis::{AnalyzeRequest, AnalyzeResponse};
 use crate::state::AppState;
 
 /// 等待同数据段（CacheKey）的在途分析完成并重查缓存。
@@ -31,12 +32,7 @@ async fn await_in_flight_result(
     Some(AnalyzeResponse {
         snapshot: Some(snapshot),
         service_cache_hit: true,
-        timing: Some(TimingStats {
-            total_ms: elapsed_ms,
-            build_bars_ms: 0,
-            analyze_ms: 0,
-            map_channels_ms: 0,
-        }),
+        timing: Some(timing_stats(elapsed_ms, 0)),
     })
 }
 
@@ -86,12 +82,7 @@ pub async fn handle(
             return Ok(AnalyzeResponse {
                 snapshot: Some(snapshot),
                 service_cache_hit: true,
-                timing: Some(TimingStats {
-                    total_ms: started.elapsed().as_millis() as u32,
-                    build_bars_ms: 0,
-                    analyze_ms: 0,
-                    map_channels_ms: 0,
-                }),
+                timing: Some(timing_stats(started.elapsed().as_millis() as u32, 0)),
             });
         }
     }
@@ -146,12 +137,7 @@ pub async fn handle(
             return Ok(AnalyzeResponse {
                 snapshot: Some(snapshot),
                 service_cache_hit: true,
-                timing: Some(TimingStats {
-                    total_ms: elapsed_ms,
-                    build_bars_ms: 0,
-                    analyze_ms: 0,
-                    map_channels_ms: 0,
-                }),
+                timing: Some(timing_stats(elapsed_ms, 0)),
             });
         }
     }
@@ -196,24 +182,8 @@ pub async fn handle(
     Ok(AnalyzeResponse {
         snapshot: Some(snapshot),
         service_cache_hit: false,
-        timing: Some(TimingStats {
-            total_ms: elapsed_ms,
-            build_bars_ms: 0,
-            analyze_ms: elapsed_ms,
-            map_channels_ms: 0,
-        }),
+        timing: Some(timing_stats(elapsed_ms, elapsed_ms)),
     })
-}
-
-fn patch_debug_channels(channels: &mut [ChannelSeries], cache_hit: bool, latency_ms: f32) {
-    for channel in channels {
-        match channel.func_id {
-            901 => channel.values.fill(if cache_hit { 1.0 } else { 0.0 }),
-            902 => channel.values.fill(1.0),
-            903 => channel.values.fill(latency_ms),
-            _ => {}
-        }
-    }
 }
 
 struct ActiveRequestGuard {

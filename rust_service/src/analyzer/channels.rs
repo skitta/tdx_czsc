@@ -245,6 +245,14 @@ fn fill_signal_channel(values: &mut [f32], buy_sell_points: &[BuySellPoint], fun
     }
 }
 
+/// 全量支持的 func_id 列表（单一来源）。
+///
+/// `handlers/version.rs` 的 `supported_func_ids` 与 DLL 侧约定都以这里为准，
+/// 新增通道需同时更新 `resolve_channel_meta` 与本列表。
+pub(crate) const SUPPORTED_FUNC_IDS: &[u32] = &[
+    101, 102, 201, 202, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

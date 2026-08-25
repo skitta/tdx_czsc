@@ -1,9 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 
 use crate::proto::analysis::AnalysisSnapshot;
 
-#[derive(Debug, Clone, Eq)]
+/// 快照缓存键：请求中影响分析结果的参数子集（与 DLL 侧指纹约定一致）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub func_group: String,
     pub input_hash: u64,
@@ -12,30 +12,6 @@ pub struct CacheKey {
     pub max_bi_num: u32,
     pub min_bi_len: u32,
     pub analysis_window: u32,
-}
-
-impl PartialEq for CacheKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.func_group == other.func_group
-            && self.input_hash == other.input_hash
-            && self.data_len == other.data_len
-            && self.freq_hint == other.freq_hint
-            && self.max_bi_num == other.max_bi_num
-            && self.min_bi_len == other.min_bi_len
-            && self.analysis_window == other.analysis_window
-    }
-}
-
-impl Hash for CacheKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.func_group.hash(state);
-        self.input_hash.hash(state);
-        self.data_len.hash(state);
-        self.freq_hint.hash(state);
-        self.max_bi_num.hash(state);
-        self.min_bi_len.hash(state);
-        self.analysis_window.hash(state);
-    }
 }
 
 #[derive(Debug)]

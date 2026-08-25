@@ -12,6 +12,7 @@ pub async fn handle(state: &std::sync::Arc<AppState>, _request: VersionRequest) 
             "single_level_structure".to_string(),
             "single_level_signals".to_string(),
         ],
-        supported_func_ids: vec![101, 102, 201, 202, 301, 302, 303, 401, 402, 403, 404, 405, 406, 901, 902, 903],
+        // func_id 列表以 analyzer 的单一映射表为准（含 304 边界通道）
+        supported_func_ids: crate::analyzer::SUPPORTED_FUNC_IDS.to_vec(),
     })
 }

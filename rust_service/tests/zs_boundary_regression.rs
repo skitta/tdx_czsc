@@ -5,60 +5,25 @@
 
 use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
 use tdx_czsc_service::config::AppConfig;
-use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
 
-fn load_series(path: &str) -> (Vec<String>, Vec<f32>, Vec<f32>, Vec<f32>) {
-    let csv = std::fs::read_to_string(path).expect("read csv");
-    let mut dates = Vec::new();
-    let mut high = Vec::new();
-    let mut low = Vec::new();
-    let mut close = Vec::new();
-    for line in csv.lines().skip(1) {
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        dates.push(parts[0].to_string());
-        high.push(parts[2].parse().expect("high"));
-        low.push(parts[3].parse().expect("low"));
-        close.push(parts[4].parse().expect("close"));
-    }
-    (dates, high, low, close)
-}
+mod common;
+use common::{analyze_request, load_series};
 
 fn build_channels() -> (Vec<String>, tdx_czsc_service::proto::analysis::AnalysisSnapshot, Vec<f32>) {
     let (dates, high, low, close) = load_series("../tests/data/002340_day.csv");
-    let data_len = high.len() as u32;
 
-    let request = AnalyzeRequest {
-        func_group: "single_level_structure".to_string(),
-        requested_func_ids: vec![301, 302, 303, 304],
-        symbol_hint: "002340.SZ".to_string(),
-        freq_hint: "D".to_string(),
-        data_len,
-        input_hash: 0,
-        bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
-        series: Some(MarketSeries {
-            open: Vec::new(),
-            high,
-            low,
-            close,
-            vol: Vec::new(),
-            amount: Vec::new(),
-            dt_unix_ms: Vec::new(),
-        }),
-        options: Some(CzscOptions {
-            max_bi_num: 50,
-            min_bi_len: 6,
-            analysis_window: 1000,
-            include_channels: true,
-            include_objects: true,
-            enable_incremental: false,
-        }),
-        prefer_cached: false,
-        caller_instance_id: 7,
-    };
+    let request = analyze_request(
+        "002340.SZ",
+        vec![301, 302, 303, 304],
+        "D",
+        high,
+        low,
+        close,
+        6,
+        1000,
+        true,
+    );
 
     let mut config = AppConfig::default();
     config.min_bi_len = 6;
@@ -143,40 +108,19 @@ fn pivot_edges_follow_trend_on_real_data() {
         ("../tests/data/002340_30m.csv", "F30", 3, 1000),
     ] {
         let (_, high, low, close) = load_series(csv_path);
-        let data_len = high.len() as u32;
-
-        let request = AnalyzeRequest {
-            func_group: "single_level_structure".to_string(),
-            requested_func_ids: vec![],
-            symbol_hint: csv_path
+        let request = analyze_request(
+            csv_path
                 .trim_start_matches("../tests/data/")
-                .trim_end_matches(".csv")
-                .to_string(),
-            freq_hint: freq_hint.to_string(),
-            data_len,
-            input_hash: 0,
-            bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3
-                as i32,
-            series: Some(MarketSeries {
-                open: Vec::new(),
-                high,
-                low,
-                close,
-                vol: Vec::new(),
-                amount: Vec::new(),
-                dt_unix_ms: Vec::new(),
-            }),
-            options: Some(CzscOptions {
-                max_bi_num: 50,
-                min_bi_len,
-                analysis_window: window,
-                include_channels: false,
-                include_objects: false,
-                enable_incremental: false,
-            }),
-            prefer_cached: false,
-            caller_instance_id: 7,
-        };
+                .trim_end_matches(".csv"),
+            vec![],
+            freq_hint,
+            high,
+            low,
+            close,
+            min_bi_len,
+            window,
+            false,
+        );
 
         let mut config = AppConfig::default();
         config.min_bi_len = min_bi_len;
@@ -184,7 +128,7 @@ fn pivot_edges_follow_trend_on_real_data() {
         let state = AppState::new(config);
 
         let freq = parse_freq(freq_hint).expect("freq");
-        let window_start = (data_len as usize).saturating_sub(window as usize);
+        let window_start = (request.data_len as usize).saturating_sub(window as usize);
         let bars =
             build_raw_bars(&request, freq, window_start, state.config.derive_volume_proxy)
                 .expect("bars");

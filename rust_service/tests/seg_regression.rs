@@ -9,54 +9,25 @@
 
 use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
 use tdx_czsc_service::config::AppConfig;
-use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries, Segment};
+use tdx_czsc_service::proto::analysis::Segment;
 use tdx_czsc_service::state::AppState;
 
+mod common;
+use common::{analyze_request, load_series};
+
 fn build() -> (Vec<String>, tdx_czsc_service::proto::analysis::AnalysisSnapshot) {
-    let csv = std::fs::read_to_string("../tests/data/002340_day.csv").expect("read csv");
-    let mut dates = Vec::new();
-    let mut high = Vec::new();
-    let mut low = Vec::new();
-    let mut close = Vec::new();
-    for line in csv.lines().skip(1) {
-        let p: Vec<&str> = line.split(',').collect();
-        if p.len() < 5 {
-            continue;
-        }
-        dates.push(p[0].to_string());
-        high.push(p[2].parse::<f32>().unwrap());
-        low.push(p[3].parse::<f32>().unwrap());
-        close.push(p[4].parse::<f32>().unwrap());
-    }
-    let data_len = high.len() as u32;
-    let request = AnalyzeRequest {
-        func_group: "single_level_structure".to_string(),
-        requested_func_ids: vec![101, 102, 201, 203, 204],
-        symbol_hint: "002340.SZ".to_string(),
-        freq_hint: "D".to_string(),
-        data_len,
-        input_hash: 0,
-        bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
-        series: Some(MarketSeries {
-            open: Vec::new(),
-            high,
-            low,
-            close,
-            vol: Vec::new(),
-            amount: Vec::new(),
-            dt_unix_ms: Vec::new(),
-        }),
-        options: Some(CzscOptions {
-            max_bi_num: 50,
-            min_bi_len: 6,
-            analysis_window: 1000,
-            include_channels: true,
-            include_objects: true,
-            enable_incremental: false,
-        }),
-        prefer_cached: false,
-        caller_instance_id: 7,
-    };
+    let (dates, high, low, close) = load_series("../tests/data/002340_day.csv");
+    let request = analyze_request(
+        "002340.SZ",
+        vec![101, 102, 201, 203, 204],
+        "D",
+        high,
+        low,
+        close,
+        6,
+        1000,
+        true,
+    );
     let mut config = AppConfig::default();
     config.min_bi_len = 6;
     config.default_analysis_window = 1000;

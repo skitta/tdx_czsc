@@ -53,9 +53,12 @@ set_target_properties(tdx_czsc_bridge PROPERTIES
 
 add_executable(tdx_czsc_ipc_smoke_test
     tests/ipc_client_smoke.cpp
+    src/bridge_functions.cpp
+    src/bridge_cache.cpp
     src/bridge_ipc_client.cpp
     src/bridge_config.cpp
     src/bridge_logging.cpp
+    src/bridge_output_mapper.cpp
     ${TDX_CZSC_PROTO_SRCS}
     ${TDX_CZSC_PROTO_HDRS}
 )

@@ -31,6 +31,8 @@ struct AnalyzeRequestCpp {
     std::vector<float> high;
     std::vector<float> low;
     std::vector<float> close;
+    // 量能序列（func_id 950 量能输入通道缓存融合；为空表示公式未挂量能通道）
+    std::vector<float> vol;
 };
 
 struct AnalysisSnapshotCpp {

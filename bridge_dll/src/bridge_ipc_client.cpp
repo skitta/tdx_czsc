@@ -94,6 +94,7 @@ void BuildAnalyzeEnvelope(const AnalyzeRequestCpp& request, tdx::czsc::v1::Reque
     FillRepeatedFloat(request.high, series->mutable_high());
     FillRepeatedFloat(request.low, series->mutable_low());
     FillRepeatedFloat(request.close, series->mutable_close());
+    FillRepeatedFloat(request.vol, series->mutable_vol());
 
     auto* options = analyze->mutable_options();
     options->set_max_bi_num(request.options.max_bi_num);

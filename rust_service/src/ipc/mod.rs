@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 #[cfg(windows)]
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub async fn run_server(state: std::sync::Arc<AppState>) -> Result<()> {
     #[cfg(windows)]

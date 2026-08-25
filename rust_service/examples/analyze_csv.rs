@@ -65,6 +65,7 @@ fn main() -> Result<()> {
 
     let mut config = AppConfig::default();
     config.min_bi_len = min_bi_len as u32;
+    let derive_volume_proxy = config.derive_volume_proxy;
     let state = Arc::new(AppState::new(config));
 
     let request = AnalyzeRequest {
@@ -98,7 +99,7 @@ fn main() -> Result<()> {
     let window_start =
         (close as usize).saturating_sub(request.options.as_ref().unwrap().analysis_window as usize);
     let t0 = std::time::Instant::now();
-    let bars = tdx_czsc_service::analyzer::build_raw_bars(&request, tdx_czsc_service::analyzer::parse_freq(&request.freq_hint).expect("freq"), window_start).expect("bars");
+    let bars = tdx_czsc_service::analyzer::build_raw_bars(&request, tdx_czsc_service::analyzer::parse_freq(&request.freq_hint).expect("freq"), window_start, derive_volume_proxy).expect("bars");
     let t1 = std::time::Instant::now();
     let czsc = czsc_core::analyze::CZSC::new(bars.clone(), 50, min_bi_len);
     let t2 = std::time::Instant::now();

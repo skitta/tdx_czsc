@@ -16,9 +16,12 @@ struct BridgeConfig {
 
     /// 连接等待超时（WaitNamedPipeW），首次/启动期允许更长。
     uint32_t startup_timeout_ms = 500;
-    /// 单次请求读写超时。首次分析（无缓存）在 Release 服务下约 50ms，
-    /// 留足裕量；缓存命中后远低于此值。
-    uint32_t request_timeout_ms = 500;
+    /// 单次请求读写超时。首刷（无缓存）在 Release 服务下实测：
+    /// 1000 根窗口约 70~100ms、3933 根约 240ms（signal 演化占大头）；
+    /// 通达信多窗口/多公式同时首刷会并发排队（服务端已做同数据段合并，
+    /// 并发上限 2），因此保留 3s 余量；异常场景最多卡顿 3s（优于图上空白）。
+    /// 缓存命中/去重等待后远低于此值。
+    uint32_t request_timeout_ms = 3000;
     /// 连接失败后的额外重试次数（不含首次尝试）。
     uint32_t connect_retry_count = 2;
     /// 连接重试间隔。
@@ -35,8 +38,10 @@ struct BridgeConfig {
     uint32_t min_bi_len = 6;
     uint32_t analysis_window = 1000;
 
-    /// DLL 本地快照缓存容量。
-    std::size_t dll_cache_capacity = 4;
+    /// DLL 本地快照缓存容量。通达信组合图（日线主图 + 周线/分时附图等）
+    /// 每个数据段各占一条，默认 16 覆盖常见多窗口组合；容量不足时旧段被
+    /// 挤出会触发服务端重新分析。
+    std::size_t dll_cache_capacity = 16;
 };
 
 /// 读取并合并三层配置，返回最终生效配置。

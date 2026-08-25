@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "bridge_functions.h"
 #include "bridge_ipc_client.h"
 #include "bridge_config.h"
 #include "bridge_logging.h"
@@ -142,6 +143,60 @@ int main() {
 
     std::cout << "log_file         : " << tdx_czsc::GetBridgeLogFilePath() << '\n';
 
+    // ==== 量能通道（950）验证：模拟公式先调 TDXDLL1(950, HIGH, LOW, VOL) ====
+    std::cout << "\n== 950 量能输入通道 ==\n";
+    PluginTCalcFuncInfo* func_950 = nullptr;
+    for (PluginTCalcFuncInfo* p = tdx_czsc::GetFunctionRegistry();
+         p != nullptr && p->pCallFunc != nullptr; ++p) {
+        if (p->nFuncMark == 950) {
+            func_950 = p;
+            break;
+        }
+    }
+    if (func_950 == nullptr) {
+        std::cerr << "func_id=950 not registered\n";
+        return 1;
+    }
+
+    // VOL 序列：与 high/low 等长、有区分度（模拟通达信 VOL）
+    std::vector<float> vol;
+    vol.reserve(kLen);
+    for (std::size_t i = 0; i < kLen; ++i) {
+        vol.push_back(1000.0f + static_cast<float>(i % 7) * 500.0f +
+                      static_cast<float>((i * 13) % 11));
+    }
+
+    std::vector<float> vol_echo(kLen, 0.0f);
+    func_950->pCallFunc(static_cast<int>(kLen), vol_echo.data(), request.high.data(),
+                        request.low.data(), vol.data());
+    const bool echo_ok =
+        vol_echo.size() == vol.size() &&
+        std::equal(vol_echo.begin(), vol_echo.end(), vol.begin());
+    std::cout << "  Func950 echo==VOL : " << (echo_ok ? "true" : "false") << '\n';
+    if (!echo_ok) {
+        std::cerr << "Func950 output should echo the third input (VOL)\n";
+        return 1;
+    }
+
+    // 950 之后走一次分析通道：请求应融合量能并经服务端正常处理。
+    // 服务端 Windows 命名管道为 FIRST_PIPE_INSTANCE 单实例语义，
+    // 处理请求期间无监听实例；间隔等待下一实例就绪再连接。
+    Sleep(400);
+    std::vector<float> out_401(kLen, 0.0f);
+    tdx_czsc::HandleFunc(401, static_cast<int>(kLen), out_401.data(), request.high.data(),
+                         request.low.data(), request.close.data());
+    const bool has_signal = std::any_of(out_401.begin(), out_401.end(),
+                                        [](float v) { return v != 0.0f; });
+    std::cout << "  HandleFunc(401) after 950 : " << (has_signal ? "has signal" : "zero output") << '\n';
+
+    Sleep(400);
+    // 带量能请求（模拟 BuildRequest 融合后的请求）与分析请求对比：
+    // 服务端应正常消费 vol 并返回与不带量能一致的结构通道集合。
+    tdx_czsc::AnalyzeRequestCpp request_with_vol = request;
+    request_with_vol.vol = vol;
+    request_with_vol.input_hash = 0x99AABBCCDDEEFF00ULL;  // 融合后哈希（DLL 侧已纳入 vol）
+    request_with_vol.prefer_cached = false;
+
     const bool ok = client.Analyze(request, &snapshot, &error);
     if (!ok) {
         tdx_czsc::LogError("ipc_smoke_test Analyze failed: " + error);
@@ -179,6 +234,23 @@ int main() {
     PrintChannelPreview(snapshot.channels, 901);
     PrintChannelPreview(snapshot.channels, 902);
     PrintChannelPreview(snapshot.channels, 903);
+
+    // 带量能请求：验证服务端 vol 消费链路正常（结构通道集合一致即可）
+    tdx_czsc::AnalysisSnapshotCpp snapshot_with_vol;
+    std::string vol_error;
+    const bool vol_ok = client.Analyze(request_with_vol, &snapshot_with_vol, &vol_error);
+    if (!vol_ok) {
+        tdx_czsc::LogError("ipc_smoke_test Analyze(with vol) failed: " + vol_error);
+        std::cerr << "Analyze(with vol) failed: " << vol_error << '\n';
+        return 1;
+    }
+    std::cout << "Analyze(with vol) ok\n";
+    std::cout << "  channel_count    : " << snapshot_with_vol.channels.size()
+              << " (without vol: " << snapshot.channels.size() << ")\n";
+    if (snapshot_with_vol.channels.size() != snapshot.channels.size()) {
+        std::cerr << "channel set mismatch between with/without vol requests\n";
+        return 1;
+    }
 
     return 0;
 }

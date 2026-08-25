@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use czsc_core::analyze::CZSC;
+use czsc_core::analyze::utils::get_zs_seq;
 use czsc_core::objects::bar::RawBarBuilder;
 use czsc_core::objects::bi::BI;
 use czsc_core::objects::direction::Direction as CzscDirection;
@@ -45,7 +46,7 @@ pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<Anal
 
     let freq = parse_freq(&request.freq_hint)?;
     let window_start = data_len.saturating_sub(analysis_window as usize);
-    let bars = build_raw_bars(request, freq, window_start)?;
+    let bars = build_raw_bars(request, freq, window_start, state.config.derive_volume_proxy)?;
 
     if bars.is_empty() {
         bail!("bars are empty after applying analysis window");
@@ -72,7 +73,7 @@ pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<Anal
     // 已完成的笔（get_finished_bis 已处理"最后一笔待确认"的实时场景：
     // 无包含K线不足 5 根时自动剔除最后一笔）。
     let finished_bis = czsc.get_finished_bis();
-    // 缠论规则构建中枢（见 build_pivots：相邻中枢之间必须间隔一笔）。
+    // 中枢：原生 czsc get_zs_seq 输出，再做前端/后端优化（见 build_pivots 说明）。
     let pivots = build_pivots(&finished_bis);
     // 缠论规则构建段（见 segs.rs：特征序列分型法，段 = 至少 3 笔、首尾同向）。
     let segs = build_segs(&finished_bis);
@@ -147,7 +148,9 @@ pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<Anal
             Vec::new()
         },
         segments: if include_objects {
-            segs.iter().filter_map(|s| map_segment(s, &finished_bis)).collect()
+            segs.iter()
+                .filter_map(|s| map_segment(s, &finished_bis))
+                .collect()
         } else {
             Vec::new()
         },
@@ -222,6 +225,7 @@ pub fn build_raw_bars(
     request: &AnalyzeRequest,
     freq: Freq,
     window_start: usize,
+    derive_volume_proxy: bool,
 ) -> Result<Vec<czsc_core::objects::bar::RawBar>> {
     let series = request
         .series
@@ -239,7 +243,20 @@ pub fn build_raw_bars(
         let dt = resolve_bar_datetime(i, &series.dt_unix_ms, freq)?;
         let close = series.close[i] as f64;
         let open = series.open.get(i).copied().unwrap_or(series.close[i]) as f64;
-        let vol = series.vol.get(i).copied().unwrap_or(0.0) as f64;
+        // 量能来源链（背驰判定用，见 signals.rs 模块说明）：
+        // 1. 请求携带的真实 vol（950 量能通道 / CSV 工具链）——原样使用；
+        // 2. vol 缺失且开启代理 → 单根相对振幅 (high-low)/close*100，
+        //    恢复"量能背驰"维度（通达信公式未挂 950 通道时的兜底）；
+        // 3. 否则 0.0（现状行为，量能背驰恒不成立）。
+        let vol = if series.vol.is_empty() {
+            if derive_volume_proxy {
+                amplitude_proxy_vol(series, i)
+            } else {
+                0.0
+            }
+        } else {
+            series.vol[i] as f64
+        };
         let amount = series.amount.get(i).copied().unwrap_or(0.0) as f64;
 
         let bar = RawBarBuilder::default()
@@ -260,6 +277,20 @@ pub fn build_raw_bars(
     }
 
     Ok(bars)
+}
+
+/// 单根K线相对振幅（%）：(high - low) / close × 100。
+///
+/// 量能代理（通达信公式未挂 950 量能通道时的兜底）：无量纲、不随长期价格
+/// 尺度漂移，与 czsc 量能力度"笔内累加、同窗口横向比较"的语义兼容。
+/// `close <= 0`（异常数据）时返回 0.0，保证无 NaN/Inf。
+fn amplitude_proxy_vol(series: &crate::proto::analysis::MarketSeries, index: usize) -> f64 {
+    let close = series.close[index] as f64;
+    if close <= 0.0 {
+        return 0.0;
+    }
+    let amplitude = (series.high[index] - series.low[index]) as f64;
+    (amplitude / close * 100.0).max(0.0)
 }
 
 fn resolve_bar_datetime(index: usize, provided: &[i64], freq: Freq) -> Result<DateTime<Utc>> {
@@ -408,7 +439,11 @@ fn fill_bi_direction_channel(values: &mut [f32], finished_bis: &[czsc_core::obje
 /// 特征序列分型确认的段）。段的起止都是笔端点（分型位置），方向由 101/102
 /// 顶底分型通道判定：向上段起点为底分型、终点为顶分型；向下段反之。相邻段
 /// 共享端点分型，重复写值幂等。
-fn fill_seg_points_channel(values: &mut [f32], finished_bis: &[czsc_core::objects::bi::BI], segs: &[Segment]) {
+fn fill_seg_points_channel(
+    values: &mut [f32],
+    finished_bis: &[czsc_core::objects::bi::BI],
+    segs: &[Segment],
+) {
     for seg in segs.iter().filter(|s| s.is_sure) {
         if let Some(start_bi) = finished_bis.get(seg.start_bi_idx)
             && let Some(index) = fx_mid_index(&start_bi.fx_a)
@@ -425,7 +460,11 @@ fn fill_seg_points_channel(values: &mut [f32], finished_bis: &[czsc_core::object
 
 /// 段方向通道（204）：已确认段覆盖区间填 ±1（向上=1，向下=-1），
 /// 与 202 笔向通道对称；未确认段不填。
-fn fill_seg_direction_channel(values: &mut [f32], finished_bis: &[czsc_core::objects::bi::BI], segs: &[Segment]) {
+fn fill_seg_direction_channel(
+    values: &mut [f32],
+    finished_bis: &[czsc_core::objects::bi::BI],
+    segs: &[Segment],
+) {
     for seg in segs.iter().filter(|s| s.is_sure) {
         let Some(start_bi) = finished_bis.get(seg.start_bi_idx) else {
             continue;
@@ -456,97 +495,160 @@ enum ZsField {
     Middle,
 }
 
-/// 缠论规则构建中枢（rust-server 层）。
+/// 在原生 czsc 中枢（`get_zs_seq`）之上优化前端与后端（rust-server 层）。
 ///
-/// czsc-core 的 `get_zs_seq` 把"离开/连接笔"（第一根与前一中枢区间无交集的笔）
-/// 并入下一个中枢作为其第一笔，导致相邻中枢共享端点（前一中枢 edt == 后一
-/// 中枢 sdt），这不符合缠论"两个中枢之间至少间隔一笔"的要求。这里基于 czsc
-/// 的已完成笔重新构建：
-///   1. 中枢 = 至少 3 笔连续重叠，区间 [zd, zg] = 前 3 笔的重叠；
-///   2. 后续与区间有交集的笔并入中枢（延伸），区间不变；缠论规定中枢延伸
-///      不超过 9 段（9 笔），达到 9 笔后中枢结束——即使后续笔仍在区间内，
-///      该情形属中枢升级，图上简化为从中枢结束后重新寻找新中枢；
-///   3. 与区间无交集的笔为"离开/连接笔"，不属于任一中枢，作为两个中枢之间
-///      的间隔；下一个中枢从连接笔之后开始寻找。
-fn build_pivots(bis: &[BI]) -> Vec<ZS> {
-    /// 缠论：中枢延伸最多 9 段（笔）。
-    const MAX_ZS_BI_NUM: usize = 9;
+/// 原生 `get_zs_seq` 的笔归属是贪心的：与当前中枢区间无交集的"离开/连接笔"
+/// 并入下一个中枢作为其第一笔，导致中枢首笔/末笔可能混入进入/连接笔。这里
+/// 保留原生的中枢划分，优化两端：
+///
+/// **前端（第一笔）**：中枢第一笔必须与行情趋势相反——上升行情中第一笔
+/// 向下（"下上下"重叠）、下跌行情中第一笔向上（"上下上"重叠）。行情方向
+/// 按中枢高低位置判定：后一个中枢中轴（zz）比前一个高 → 上升行情，更低 →
+/// 下降行情；中轴平齐沿用前一趋势。第一个中枢无前序中枢，以其位置与窗口
+/// 起点价格比较兜底。首笔与趋势同向视为进入/连接笔，予以剔除；区间
+/// [zd, zg] 由剔除后剩余前 3 笔的重叠重新计算。
+///
+/// **后端（最后一笔）**：中枢最后一笔必须与行情趋势相反（与前端对称，
+/// 中枢为奇数笔结构）——末笔与趋势同向视为离开笔，予以剔除。
+///
+/// **相邻间隔**：前一个中枢后端与后一中枢前端不得共享端点，必须至少间隔
+/// 一笔——后端剔除后，离开/连接笔落在两个中枢矩形之间，不属于任一中枢。
+///
+/// 剔除后不足 3 笔、前 3 笔无重叠、或无法同时满足上述规则的候选中枢整组
+/// 剔除（不绘制）。
+pub fn build_pivots(bis: &[BI]) -> Vec<ZS> {
+    let native = get_zs_seq(bis);
 
-    fn overlap_range(b: &[BI]) -> (f64, f64) {
-        let zd = b.iter().map(|x| x.get_low()).fold(f64::NEG_INFINITY, f64::max);
-        let zg = b.iter().map(|x| x.get_high()).fold(f64::INFINITY, f64::min);
-        (zd, zg)
+    // 第一遍：前端优化 + 行情趋势链（方向按中枢高低位置递推）
+    let mut fronts: Vec<(ZS, CzscDirection)> = Vec::new();
+    let mut prev_zz: Option<f64> = None;
+    let mut prev_trend: Option<CzscDirection> = None;
+    for zs in &native {
+        // 行情方向：按中枢高低位置判定（当前中枢用原生中轴与前一中枢的
+        // 最终中轴比较；剔除进入笔对中轴影响很小，不影响方向判定）
+        let trend = match prev_zz {
+            None => {
+                if zs.zz > bis[0].fx_a.fx {
+                    CzscDirection::Up
+                } else {
+                    CzscDirection::Down
+                }
+            }
+            Some(prev) if zs.zz > prev => CzscDirection::Up,
+            Some(prev) if zs.zz < prev => CzscDirection::Down,
+            Some(_) => prev_trend.unwrap_or(CzscDirection::Up),
+        };
+        let Some(trimmed) = trim_pivot_front(zs, trend) else {
+            continue;
+        };
+        prev_zz = Some(trimmed.zz);
+        prev_trend = Some(trend);
+        fronts.push((trimmed, trend));
     }
 
-    let mut pivots = Vec::new();
-    let mut i = 0usize;
-    while i + 3 <= bis.len() {
-        // 寻找下一个"至少 3 笔重叠"的中枢起点（滑窗）
-        let mut start = None;
-        for j in i..=(bis.len() - 3) {
-            let (zd, zg) = overlap_range(&bis[j..j + 3]);
-            if zg >= zd {
-                start = Some(j);
-                break;
-            }
-        }
-        let Some(j) = start else { break; };
-
-        let (zd, zg) = overlap_range(&bis[j..j + 3]);
-        // 延伸：后续与中枢区间有交集的笔并入，且中枢总笔数不超过 9 段
-        let mut end = j + 3;
-        while end < bis.len() && end - j < MAX_ZS_BI_NUM {
-            let bi = &bis[end];
-            if bi.get_high() >= zd && bi.get_low() <= zg {
-                end += 1;
-            } else {
-                break;
-            }
-        }
-        pivots.push(ZS::new(bis[j..end].to_vec()));
-        // 下一中枢从 end+1 开始：
-        // - 正常结束：bis[end] 是与区间无交集的离开笔（连接笔），跳过；
-        // - 9 段截断：bis[end] 是第 10 笔（仍与区间重叠，属中枢升级），
-        //   作为升级过渡跳过，避免与截断中枢共享端点。
-        i = end + 1;
+    // 第二遍：后端优化（从后往前处理——需要后一保留中枢的起点判断相邻间隔，
+    // 倒序时 result 的最后一个即"后一中枢"，被剔除的中枢自动跳过）
+    let mut result: Vec<ZS> = Vec::new();
+    for (zs, trend) in fronts.into_iter().rev() {
+        let next_start = result.last().and_then(|p| bi_start_index(p.bis.first()));
+        let Some(trimmed) = trim_pivot_back(zs, trend, next_start) else {
+            continue;
+        };
+        result.push(trimmed);
     }
-    pivots
+    result.reverse();
+    result
 }
 
-/// 中枢的绘制区间（通道对齐用）：排除进入段与离开段。
+/// 剔除中枢的进入/连接笔（前端），返回优化后的中枢。
 ///
-/// 缠论：中枢 = 至少 3 个连续次级别走势（笔）的重叠部分，中枢不包含进入段
-/// （进入中枢前的走势）和离开段（离开中枢后的走势）。
-///
-/// 判断规则：
-/// - **尾笔（离开段）**：其终点极值（fx_b.fx）**超出**中枢区间 [zd, zg]
-///   （突破上沿/跌破下沿）才视为离开段予以排除；终点回到区间内（回抽回中枢）
-///   属中枢延伸，应保留。
-/// - **首笔（进入段）**：不"锚定"中枢区间（低点 != zd 且高点 != zg）的笔
-///   才是进入段予以排除；锚定区间的笔是中枢定义笔，必须保留。
-/// - 两类排除都保证剔除后核心仍不少于 3 笔，绘制的中枢始终包含至少 3 笔。
-fn zs_core_span(zs: &ZS) -> Option<(usize, usize)> {
-    let bis = &zs.bis;
-    let len = bis.len();
-    if len < 3 {
+/// 前端：首笔与趋势同向（= 进入/连接笔）时剔除；剔除后不足 3 笔不成中枢。
+/// 区间 [zd, zg] 由剔除后的前 3 笔重叠重新计算，前 3 笔无重叠则不成中枢。
+fn trim_pivot_front(zs: &ZS, trend: CzscDirection) -> Option<ZS> {
+    let mut bis: Vec<BI> = zs.bis.clone();
+    if bis.len() < 3 {
         return None;
     }
-    // 离开段（尾笔）：终点极值超出中枢区间才排除；回中枢（终点在区间内）保留
-    let last_end = bis[len - 1].fx_b.fx;
-    let last_breaks_out = last_end < zs.zd || last_end > zs.zg;
-    let end = if len >= 4 && last_breaks_out { len - 1 } else { len };
-    // 进入段（首笔）：不锚定区间且剔除后剩余 ≥3 笔才排除
-    let first_binds = bis[0].get_low() == zs.zd || bis[0].get_high() == zs.zg;
-    let start = if end - 1 >= 3 && !first_binds { 1 } else { 0 };
+    // 前端：首笔与趋势同向 = 进入/连接笔，剔除
+    if bis[0].direction == trend {
+        bis.remove(0);
+        if bis.len() < 3 {
+            return None;
+        }
+    }
+    // 区间 [zd, zg] = 前 3 笔的重叠（剔除进入笔后重新计算）
+    let zd = bis[..3]
+        .iter()
+        .map(|b| b.get_low())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let zg = bis[..3]
+        .iter()
+        .map(|b| b.get_high())
+        .fold(f64::INFINITY, f64::min);
+    if zg < zd {
+        return None;
+    }
+    Some(ZS::new(bis))
+}
 
-    let start_index = bi_start_index(bis.get(start))?;
-    let end_index = bi_end_index(bis.get(end - 1))?;
-    Some((start_index.min(end_index), start_index.max(end_index)))
+/// 剔除中枢的离开笔（后端），返回优化后的中枢。
+///
+/// 规则一（末笔方向）：中枢最后一笔必须与行情趋势相反——上升行情最后一笔
+/// 向下、下跌行情最后一笔向上（与前端对称，中枢为奇数笔结构）；末笔与
+/// 趋势同向（离开笔）时剔除。
+///
+/// 规则二（相邻间隔）：前一个中枢后端与后一中枢前端至少间隔一笔，不得
+/// 共享端点。
+///
+/// 优先级：**前端优化优先于后端**。两端发生端点共享时，后中枢前端（首笔
+/// 方向规则）不可改动，由前中枢末端退回一笔（间隔规则）；退回后若末笔
+/// 方向与趋势同向，还需再退一笔（方向规则）——循环直至两条规则都满足，
+/// 或缩至最少 3 笔。缩到最少 3 笔仍无法同时满足两条规则的候选中枢整组
+/// 剔除（不绘制）。
+fn trim_pivot_back(zs: ZS, trend: CzscDirection, next_start: Option<usize>) -> Option<ZS> {
+    let mut bis = zs.bis;
+    loop {
+        if bis.len() <= 3 {
+            break;
+        }
+        let last = bis.last().unwrap();
+        // 规则二（间隔，优先级低于前端）：与后一中枢共享/相交端点时，
+        // 后中枢前端不动（前端优先），本中枢（前中枢）末端退回一笔
+        let shares = next_start.is_some_and(|s| bi_end_index(bis.last()).is_some_and(|e| e >= s));
+        // 规则一（方向）：退回后若末笔与趋势同向（离开笔），还需再退一笔
+        let wrong_dir = last.direction == trend;
+        if !shares && !wrong_dir {
+            break;
+        }
+        bis.pop();
+    }
+    if bis.len() < 3 {
+        return None;
+    }
+    let last = bis.last().unwrap();
+    if last.direction == trend
+        || next_start.is_some_and(|s| bi_end_index(bis.last()).is_some_and(|e| e >= s))
+    {
+        return None;
+    }
+    Some(ZS::new(bis))
+}
+
+/// 中枢的绘制区间（通道对齐用）：优化后中枢整段绘制。
+///
+/// 中枢经 `build_pivots` 前端/后端优化后，首笔为进入笔剔除后的第一笔、
+/// 末笔满足方向与间隔规则（离开笔落在相邻中枢之间）；这里从中枢第一笔
+/// 起点画到最后一笔终点。相邻中枢之间留出连接笔间隔，304 通道的 3
+/// （左右界共用）保留为防御性处理。
+fn zs_span(zs: &ZS) -> Option<(usize, usize)> {
+    let start = bi_start_index(zs.bis.first())?;
+    let end = bi_end_index(zs.bis.last())?;
+    Some((start.min(end), start.max(end)))
 }
 
 fn fill_zs_channel(values: &mut [f32], pivots: &[ZS], field: ZsField) {
     for zs in pivots {
-        let Some((start, end)) = zs_core_span(zs) else {
+        let Some((start, end)) = zs_span(zs) else {
             continue;
         };
 
@@ -567,17 +669,16 @@ fn fill_zs_channel(values: &mut [f32], pivots: &[ZS], field: ZsField) {
 /// 配合 301/302 通道，通达信侧用折线/STICKLINE 画上/下沿与左右竖线，构成闭合
 /// 矩形，且相邻中枢之间互不连接。
 ///
-/// 相邻中枢共享端点K线（前一中枢的右界 == 后一中枢的左界），若按顺序直接
-/// 写值，共享K线会被后一中枢的左界 1 覆盖，前一中枢的右界 2 丢失，图上该
-/// 中枢只剩左侧竖线、没有上下边框和右边框。因此先统一写所有左界，再写右界；
-/// 遇到已写过左界的共享K线则升级为 3，公式层把 3 同时当作左界和右界。
-/// （`build_pivots` 已让相邻中枢间隔一笔，正常不会出现共享K线，这里保留
-/// 3 的处理作为兜底。）
+/// 相邻中枢共享端点K线（前一中枢的右界 == 后一中枢的左界：原生贪心归属
+/// 下，离开/连接笔被并入后一中枢作为其第一笔）。若按顺序直接写值，共享
+/// K线会被后一中枢的左界 1 覆盖，前一中枢的右界 2 丢失，图上该中枢只剩
+/// 左侧竖线、没有上下边框和右边框。因此先统一写所有左界，再写右界；遇到
+/// 已写过左界的共享K线则升级为 3，公式层把 3 同时当作左界和右界。
 fn fill_zs_boundary_channel(values: &mut [f32], pivots: &[ZS]) {
     let mut starts = Vec::with_capacity(pivots.len());
     let mut ends = Vec::with_capacity(pivots.len());
     for zs in pivots {
-        let Some((start, end)) = zs_core_span(zs) else {
+        let Some((start, end)) = zs_span(zs) else {
             continue;
         };
         starts.push(start);
@@ -657,8 +758,8 @@ fn map_stroke_segment(bi: &czsc_core::objects::bi::BI) -> Option<StrokeSegment> 
 }
 
 fn map_pivot_zone(zs: &ZS) -> Option<PivotZone> {
-    // 绘制区间排除进入段/离开段（首/尾笔），与通道保持一致
-    let (start_index, end_index) = zs_core_span(zs)?;
+    // 原生画法：整段绘制（含进入/离开笔），与通道保持一致
+    let (start_index, end_index) = zs_span(zs)?;
 
     Some(PivotZone {
         start_index: start_index as u32,
@@ -711,9 +812,10 @@ fn strictize_third_bs_by_zs(points: &mut Vec<BuySellPoint>, pivots: &[ZS]) {
             return true;
         }
         // 归属到锚点之前最近结束的中枢（用中枢组最后一笔终点）
-        let Some(zi) = pivots.iter().rposition(|zs| {
-            bi_end_index(zs.bis.last()).map_or(false, |e| e < p.index)
-        }) else {
+        let Some(zi) = pivots
+            .iter()
+            .rposition(|zs| bi_end_index(zs.bis.last()).map_or(false, |e| e < p.index))
+        else {
             return false;
         };
         if p.func_id == 405 {
@@ -806,6 +908,253 @@ mod tests {
         values.iter().filter(|x| x.abs() > f32::EPSILON).count()
     }
 
+    /// 构造一笔（测试用）：start→end 单向运行，方向按涨跌自动判定。
+    ///
+    /// fx_a/fx_b 的 dt 编码笔序号（base + idx 分钟）；端点 K 线下标编码为
+    /// idx / idx+1（相邻笔共享端点下标：笔 k 终点 == 笔 k+1 起点，与真实
+    /// 数据一致），供 `fx_mid_index` 解析出通道对齐下标。
+    fn make_series_bi(idx: i64, start: f64, end: f64) -> BI {
+        let up = end > start;
+        let base = chrono::Utc::now();
+        let mk_fx = |price: f64, mark: Mark, dt: chrono::DateTime<chrono::Utc>, bar_id: i32| {
+            let raw = czsc_core::objects::bar::RawBar {
+                symbol: std::sync::Arc::from("T"),
+                dt,
+                freq: czsc_core::objects::freq::Freq::F30,
+                open: start.min(end),
+                close: start.max(end),
+                high: start.max(end),
+                low: start.min(end),
+                vol: 0.0,
+                amount: 0.0,
+                id: bar_id,
+            };
+            let nb = |dt: chrono::DateTime<chrono::Utc>| czsc_core::objects::bar::NewBar {
+                symbol: std::sync::Arc::from("T"),
+                dt,
+                freq: czsc_core::objects::freq::Freq::F30,
+                id: bar_id,
+                open: start.min(end),
+                close: start.max(end),
+                high: start.max(end),
+                low: start.min(end),
+                vol: 0.0,
+                amount: 0.0,
+                elements: vec![raw.clone()],
+            };
+            let one_min = Duration::minutes(1);
+            czsc_core::objects::fx::FX {
+                symbol: std::sync::Arc::from("T"),
+                dt,
+                mark,
+                high: start.max(end),
+                low: start.min(end),
+                fx: price,
+                elements: vec![nb(dt - one_min), nb(dt), nb(dt + one_min)],
+            }
+        };
+        let dt_a = base + Duration::minutes(idx);
+        let dt_b = base + Duration::minutes(idx + 1000);
+        let (mark_a, mark_b) = if up {
+            (Mark::D, Mark::G)
+        } else {
+            (Mark::G, Mark::D)
+        };
+        BI {
+            symbol: std::sync::Arc::from("T"),
+            fx_a: mk_fx(start, mark_a, dt_a, idx as i32),
+            fx_b: mk_fx(end, mark_b, dt_b, idx as i32 + 1),
+            fxs: Vec::new(),
+            direction: if up {
+                CzscDirection::Up
+            } else {
+                CzscDirection::Down
+            },
+            bars: Vec::new(),
+        }
+    }
+
+    /// 中枢前端/后端优化（原生 get_zs_seq + build_pivots 全链路）：
+    /// - 前端：上升行情中枢第一笔向下、下跌行情第一笔向上；
+    /// - 后端：上升行情中枢最后一笔向下、下跌行情最后一笔向上（奇数笔
+    ///   结构）；末笔与趋势同向（离开笔）被剔除；
+    /// - 相邻间隔：前一个中枢后端与后一中枢前端至少间隔一笔（离开/连接
+    ///   笔不属于任一中枢）；无法满足时整组剔除。
+    ///
+    /// 场景 1/2：上涨/下跌各两个中枢，均为 3 笔 [下,上,下]/[上,下,上]，
+    /// 离开笔落在两中枢之间。场景 3：中枢向下破位（末笔跌破下沿）与后一
+    /// 中枢共享端点，无法同时满足规则，整组剔除。
+    #[test]
+    fn pivot_edges_follow_trend() {
+        // 场景 1：上涨——两个中枢依次抬高，均为 [下,上,下]
+        let up_pts = [
+            (10.0, 20.0), // 0 上：窗口起点进入段（剔除）
+            (20.0, 12.0), // 1 下
+            (12.0, 19.0), // 2 上
+            (19.0, 13.0), // 3 下
+            (13.0, 25.0), // 4 上：离开笔（不属于任一中枢）
+            (25.0, 22.0), // 5 下
+            (22.0, 29.0), // 6 上
+            (29.0, 23.0), // 7 下
+            (23.0, 31.0), // 8 上：离开笔（不属于任一中枢）
+            (31.0, 26.0), // 9 下：不成中枢
+        ];
+        let bis: Vec<BI> = up_pts
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
+            .collect();
+        let pivots = build_pivots(&bis);
+        assert_eq!(pivots.len(), 2, "上涨场景应保留两个中枢");
+        for (k, zs) in pivots.iter().enumerate() {
+            assert_eq!(zs.bis.len(), 3, "中枢{k}应为奇数笔 3 笔结构");
+            assert_eq!(zs.sdir, CzscDirection::Down, "上涨行情中枢{k}第一笔必须向下");
+            assert_eq!(
+                zs.bis.last().unwrap().direction,
+                CzscDirection::Down,
+                "上涨行情中枢{k}最后一笔必须向下"
+            );
+            if k > 0 {
+                assert!(zs.zz > pivots[k - 1].zz, "后中枢必须高于前中枢");
+            }
+        }
+        assert_eq!(pivots[0].bis[0].fx_a.fx, 20.0, "中枢 0 应从下跌笔 1 开始");
+        assert_eq!(pivots[1].bis[0].fx_a.fx, 25.0, "中枢 1 应从下跌笔 5 开始");
+        // 离开笔（13→25、23→31）不属于任一中枢
+        for zs in &pivots {
+            for b in &zs.bis {
+                assert!(
+                    b.fx_a.fx != 13.0 && b.fx_a.fx != 23.0,
+                    "离开笔不得属于任一中枢"
+                );
+            }
+        }
+        // 相邻间隔：前中枢末笔终点下标 < 后中枢首笔起点下标（至少间隔一笔）
+        assert!(
+            bi_end_index(pivots[0].bis.last()).unwrap()
+                < bi_start_index(pivots[1].bis.first()).unwrap(),
+            "前中枢后端必须与后一中枢前端至少间隔一笔"
+        );
+
+        // 场景 2：下跌——两个中枢依次走低，均为 [上,下,上]
+        let down_pts = [
+            (20.0, 10.0), // 0 下：窗口起点进入段（剔除）
+            (10.0, 18.0), // 1 上
+            (18.0, 11.0), // 2 下
+            (11.0, 17.0), // 3 上
+            (17.0, 8.0),  // 4 下：离开笔（不属于任一中枢）
+            (8.0, 10.0),  // 5 上
+            (10.0, 6.0),  // 6 下
+            (6.0, 9.0),   // 7 上
+            (9.0, 5.0),   // 8 下：离开笔（不属于任一中枢）
+            (5.0, 7.0),   // 9 上：不成中枢
+        ];
+        let bis: Vec<BI> = down_pts
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
+            .collect();
+        let pivots = build_pivots(&bis);
+        assert_eq!(pivots.len(), 2, "下跌场景应保留两个中枢");
+        for (k, zs) in pivots.iter().enumerate() {
+            assert_eq!(zs.bis.len(), 3, "中枢{k}应为奇数笔 3 笔结构");
+            assert_eq!(zs.sdir, CzscDirection::Up, "下跌行情中枢{k}第一笔必须向上");
+            assert_eq!(
+                zs.bis.last().unwrap().direction,
+                CzscDirection::Up,
+                "下跌行情中枢{k}最后一笔必须向上"
+            );
+            if k > 0 {
+                assert!(zs.zz < pivots[k - 1].zz, "后中枢必须低于前中枢");
+            }
+        }
+        assert_eq!(pivots[0].bis[0].fx_a.fx, 10.0, "中枢 0 应从上涨笔 1 开始");
+        assert_eq!(pivots[1].bis[0].fx_a.fx, 8.0, "中枢 1 应从上涨笔 5 开始");
+        assert!(
+            bi_end_index(pivots[0].bis.last()).unwrap()
+                < bi_start_index(pivots[1].bis.first()).unwrap(),
+            "前中枢后端必须与后一中枢前端至少间隔一笔"
+        );
+
+        // 场景 3：中枢 [12,19] 向下破位（末笔 19→8 跌破下沿），后一中枢起点
+        // 与该末笔终点共享端点——3 笔无法再缩，整组剔除，仅保留后一中枢。
+        let reversal_pts = [
+            (10.0, 20.0), // 0 上：进入段（剔除）
+            (20.0, 12.0), // 1 下
+            (12.0, 19.0), // 2 上
+            (19.0, 8.0),  // 3 下：破位，末笔终点与笔 4 起点共享
+            (8.0, 10.0),  // 4 上：后一中枢首笔
+            (10.0, 6.0),  // 5 下
+            (6.0, 9.0),   // 6 上
+            (9.0, 5.0),   // 7 下
+            (5.0, 8.0),   // 8 上
+        ];
+        let bis: Vec<BI> = reversal_pts
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
+            .collect();
+        let pivots = build_pivots(&bis);
+        assert_eq!(pivots.len(), 1, "破位中枢无法满足间隔规则应整组剔除");
+        assert_eq!(pivots[0].sdir, CzscDirection::Up, "下跌行情（后中枢更低）第一笔向上");
+        assert_eq!(
+            pivots[0].bis[0].fx_a.fx,
+            8.0,
+            "保留的中枢应从笔 4 开始"
+        );
+        assert_eq!(pivots[0].bis.len(), 5, "后一中枢保留 5 笔（末笔向上）");
+
+        // 场景 4：端点共享时前端优先——后中枢前端不动，前中枢末端先退一笔
+        // （间隔），退回后末笔与趋势同向再退一笔（方向），剩 [下,上,下]。
+        // 前中枢 [13,19] 末两笔为 U(13→25) 上破 + D(25→11) 深跌回踩（与
+        // 后中枢首笔 U(11→12.5) 共享端点 11），先后退 D(25→11)（间隔）、
+        // 再退 U(13→25)（方向）。
+        let sweep_pts = [
+            (10.0, 20.0),  // 0 上：进入段（剔除）
+            (20.0, 12.0),  // 1 下
+            (12.0, 19.0),  // 2 上
+            (19.0, 13.0),  // 3 下
+            (13.0, 25.0),  // 4 上：上破
+            (25.0, 11.0),  // 5 下：深跌回踩，与笔 6 共享端点 11
+            (11.0, 11.5),  // 6 上：完全低于原生区间下沿（12）→ 新中枢首笔
+            (11.5, 9.0),   // 7 下
+            (9.0, 12.0),   // 8 上
+            (12.0, 8.0),   // 9 下
+            (8.0, 11.0),   // 10 上
+        ];
+        let bis: Vec<BI> = sweep_pts
+            .iter()
+            .enumerate()
+            .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
+            .collect();
+        let pivots = build_pivots(&bis);
+        assert_eq!(pivots.len(), 2, "深跌回踩场景应保留两个中枢");
+        // 前中枢：先退间隔一笔（笔 5），再退方向一笔（笔 4），剩 [下,上,下]
+        assert_eq!(pivots[0].sdir, CzscDirection::Down, "前中枢（上升行情）第一笔向下");
+        assert_eq!(pivots[0].bis.len(), 3, "前中枢应退回两笔后剩 3 笔");
+        assert_eq!(pivots[0].bis[0].fx_a.fx, 20.0, "前中枢应从下跌笔 1 开始");
+        assert_eq!(
+            pivots[0].bis.last().unwrap().fx_b.fx,
+            13.0,
+            "前中枢末笔应为 D(19→13)，不再包含笔 4/5"
+        );
+        // 后中枢：前端优先未被触碰（首笔 U 保留），趋势向下、末笔向上
+        assert_eq!(pivots[1].sdir, CzscDirection::Up, "后中枢（下跌行情）第一笔向上");
+        assert_eq!(pivots[1].bis[0].fx_a.fx, 11.0, "后中枢首笔应为 U(11→11.5)");
+        assert_eq!(pivots[1].bis.len(), 5, "后中枢保留 5 笔");
+        assert_eq!(
+            pivots[1].bis.last().unwrap().direction,
+            CzscDirection::Up,
+            "下跌行情后中枢末笔向上"
+        );
+        // 间隔：前中枢末笔终点（笔 3 终点）在笔 4/5 之后，与后中枢起点隔开
+        assert!(
+            bi_end_index(pivots[0].bis.last()).unwrap()
+                < bi_start_index(pivots[1].bis.first()).unwrap(),
+            "前中枢后端必须与后一中枢前端至少间隔一笔"
+        );
+    }
+
     #[test]
     fn build_snapshot_populates_core_channels_and_objects() {
         let state = test_state();
@@ -860,9 +1209,8 @@ mod tests {
 
     #[test]
     fn compute_buy_sell_points_runs_on_sample_data() {
-        let state = test_state();
         let request = sample_request(false);
-        let bars = build_raw_bars(&request, Freq::F30, 0).expect("bars should build");
+        let bars = build_raw_bars(&request, Freq::F30, 0, true).expect("bars should build");
         let points = compute_buy_sell_points(&bars, 50, 3);
         // 样例数据（64 根、15 笔）可命中 403 二买；信号产出取决于数据形态，
         // 这里只验证与 czsc-signals 的接入管线可运行。
@@ -921,18 +1269,15 @@ mod tests {
     #[test]
     fn profile_analysis_stages() {
         use std::time::Instant;
-        let state = test_state();
         let request = sample_request(false);
         let series = request.series.as_ref().unwrap();
 
         let t0 = Instant::now();
-        let bars = build_raw_bars(&request, Freq::F30, 0).expect("bars");
+        let bars = build_raw_bars(&request, Freq::F30, 0, true).expect("bars");
         let t1 = Instant::now();
-        let czsc = CZSC::new(bars.clone(), 50, 3);
         let t2 = Instant::now();
         let points = compute_buy_sell_points(&bars, 50, 3);
         let t3 = Instant::now();
-        let pivots = build_pivots(&czsc.get_finished_bis());
         let t4 = Instant::now();
 
         println!(
@@ -1037,7 +1382,10 @@ mod tests {
             "bottom fractal should be placed at idx5 (extreme bar), got {}",
             fx_bottom.values[5]
         );
-        assert_eq!(fx_bottom.values[3], 0.0, "no fractal at merge-group start idx3");
+        assert_eq!(
+            fx_bottom.values[3], 0.0,
+            "no fractal at merge-group start idx3"
+        );
 
         let fx_top = channel(&snapshot, 101);
         assert!(
@@ -1045,5 +1393,54 @@ mod tests {
             "top fractal should stay at idx2, got {}",
             fx_top.values[2]
         );
+    }
+
+    /// 量能来源链 1：请求携带真实 vol（950 量能通道 / CSV 工具链）→ 原样使用。
+    #[test]
+    fn build_raw_bars_uses_provided_volume() {
+        let mut request = sample_request(false);
+        // 全 64 根给确定性的 vol，含 0（如停牌日），验证原样透传
+        let expected_vol: Vec<f32> = (0..request.data_len)
+            .map(|i| (i % 5) as f32 * 100.0)
+            .collect();
+        request.series.as_mut().unwrap().vol = expected_vol.clone();
+
+        let bars = build_raw_bars(&request, Freq::F30, 0, true).expect("bars");
+        assert_eq!(bars.len(), request.data_len as usize);
+        for (i, bar) in bars.iter().enumerate() {
+            assert_eq!(
+                bar.vol,
+                expected_vol[i] as f64,
+                "vol at {i} must pass through"
+            );
+        }
+    }
+
+    /// 量能来源链 2：vol 缺失 + 代理开启 → 每根 (high-low)/close*100。
+    #[test]
+    fn build_raw_bars_derives_amplitude_proxy_when_vol_absent() {
+        let request = sample_request(false);
+        let series = request.series.as_ref().unwrap();
+        assert!(series.vol.is_empty(), "sample has no vol");
+
+        let bars = build_raw_bars(&request, Freq::F30, 0, true).expect("bars");
+        for (i, bar) in bars.iter().enumerate() {
+            let close = series.close[i] as f64;
+            let expected = (series.high[i] - series.low[i]) as f64 / close * 100.0;
+            assert!(
+                (bar.vol - expected).abs() < 1e-6,
+                "proxy vol at {i}: got {} expected {}",
+                bar.vol,
+                expected
+            );
+        }
+    }
+
+    /// 量能来源链 3：vol 缺失 + 代理关闭 → 0.0（现状行为，可回退）。
+    #[test]
+    fn build_raw_bars_zero_when_proxy_disabled() {
+        let request = sample_request(false);
+        let bars = build_raw_bars(&request, Freq::F30, 0, false).expect("bars");
+        assert!(bars.iter().all(|bar| bar.vol == 0.0));
     }
 }

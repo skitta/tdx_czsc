@@ -7,7 +7,7 @@
 //! - 确认段（is_sure）必须满足方向校验（向上段起点低于终点、向下段反之）。
 //! 使用仓库内真实数据 tests/data/002340_day.csv（对应报告的 002340 案例）。
 
-use tdx_czsc_service::analyzer::build_snapshot;
+use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
 use tdx_czsc_service::config::AppConfig;
 use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries, Segment};
 use tdx_czsc_service::state::AppState;
@@ -61,7 +61,8 @@ fn build() -> (Vec<String>, tdx_czsc_service::proto::analysis::AnalysisSnapshot)
     config.min_bi_len = 6;
     config.default_analysis_window = 1000;
     let state = AppState::new(config);
-    let snapshot = build_snapshot(&request, &state).expect("snapshot");
+    let params = AnalysisParams::from((&request, &state.config));
+    let snapshot = build_snapshot(&request, &params).expect("snapshot");
     (dates, snapshot)
 }
 

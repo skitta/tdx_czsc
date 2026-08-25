@@ -149,7 +149,8 @@ fn main() -> Result<()> {
         "分段: bars={} build_raw_bars={:?} czsc_new={:?} signals={:?}",
         bars.len(), t1 - t0, t2 - t1, t3 - t2
     );
-    let snapshot = build_snapshot(&request, state.as_ref())?;
+    let params = tdx_czsc_service::analyzer::AnalysisParams::from((&request, &state.config));
+    let snapshot = build_snapshot(&request, &params)?;
     println!("build_snapshot 总耗时: {:?}", started.elapsed());
 
     println!("\n== 通道命中统计 ==");    for (func_id, name) in CHANNEL_NAMES {

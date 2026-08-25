@@ -29,7 +29,7 @@ use czsc_signals::types::TaCache;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use tdx_czsc_service::analyzer::{build_snapshot, compute_buy_sell_points};
+use tdx_czsc_service::analyzer::{build_snapshot, compute_buy_sell_points, AnalysisParams};
 use tdx_czsc_service::config::AppConfig;
 use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
@@ -316,7 +316,8 @@ fn first_buy_channel_via_proxy_on_synthetic_downtrend() {
         caller_instance_id: 1,
     };
 
-    let snapshot = build_snapshot(&request, &state).expect("snapshot");
+    let params = AnalysisParams::from((&request, &state.config));
+    let snapshot = build_snapshot(&request, &params).expect("snapshot");
     let channel = snapshot
         .channels
         .iter()

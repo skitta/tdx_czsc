@@ -157,11 +157,13 @@ pub async fn handle(
     }
 
     // 5) 分析（CPU 密集）在阻塞线程池执行，不占用 runtime worker；
-    //    AnalysisRequest 为 Clone，AppState 经 Arc 传入。
+    //    AnalysisRequest 为 Clone，AppState 经 Arc 传入；分析参数由
+    //    请求 + 配置解析（analyzer::AnalysisParams），与运行时状态解耦。
     let analyze_request = request.clone();
     let analyze_state = state.clone();
     let analyze = tokio::task::spawn_blocking(move || -> Result<_> {
-        analyzer::build_snapshot(&analyze_request, analyze_state.as_ref())
+        let params = analyzer::AnalysisParams::from((&analyze_request, &analyze_state.config));
+        analyzer::build_snapshot(&analyze_request, &params)
     })
     .await
     .map_err(|err| anyhow!("analysis task join failed: {err}"))?;

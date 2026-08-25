@@ -126,7 +126,7 @@ fn second_bs_attached_to_first_bs() {
 /// 走 build_snapshot 实际路径（严格化发生在中枢构建之后）。
 #[test]
 fn third_bs_capped_per_pivot() {
-    use tdx_czsc_service::analyzer::build_snapshot;
+    use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
     use tdx_czsc_service::config::AppConfig;
     use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
     use tdx_czsc_service::state::AppState;
@@ -177,7 +177,8 @@ fn third_bs_capped_per_pivot() {
     config.min_bi_len = 6;
     config.default_analysis_window = 1000;
     let state = AppState::new(config);
-    let snapshot = build_snapshot(&request, &state).expect("snapshot");
+    let params = AnalysisParams::from((&request, &state.config));
+    let snapshot = build_snapshot(&request, &params).expect("snapshot");
 
     // 三买/三卖数量不应超过中枢数量（每个中枢最多一个）
     let n405 = snapshot.signals.iter().filter(|s| s.kind == 5).count();

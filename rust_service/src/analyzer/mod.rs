@@ -32,17 +32,70 @@ use anyhow::{Result, anyhow, bail};
 use czsc_core::analyze::CZSC;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::AppConfig;
 use crate::proto::analysis::{
     AnalysisSnapshot, AnalyzeRequest, FractalPoint, PivotZone, SignalPoint, SnapshotMeta,
     StrokeSegment,
 };
-use crate::state::AppState;
 
 use objects::map_segment;
 use pivots::strictize_third_bs_by_zs;
 
+/// 分析参数：`build_snapshot` 唯一的运行时输入。
+///
+/// 由请求选项 + 服务配置解析而来（选项优先、配置兜底），使分析管线成为
+/// 不依赖运行时状态的纯函数——单元测试与未来多周期/增量分析可直接构造。
+#[derive(Debug, Clone)]
+pub struct AnalysisParams {
+    /// 分析窗口（bar 数）
+    pub analysis_window: u32,
+    pub max_bi_num: u32,
+    pub min_bi_len: u32,
+    /// vol 缺失时是否派生振幅代理量（见 rawbars 量能来源链）
+    pub derive_volume_proxy: bool,
+    /// 分析器版本标识（写入快照 meta）
+    pub czsc_version: String,
+}
+
+impl From<&AppConfig> for AnalysisParams {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            analysis_window: config.default_analysis_window,
+            max_bi_num: config.max_bi_num,
+            min_bi_len: config.min_bi_len,
+            derive_volume_proxy: config.derive_volume_proxy,
+            czsc_version: config.czsc_version.clone(),
+        }
+    }
+}
+
+impl From<(&AnalyzeRequest, &AppConfig)> for AnalysisParams {
+    fn from((request, config): (&AnalyzeRequest, &AppConfig)) -> Self {
+        let options = request.options.as_ref();
+        Self {
+            analysis_window: options
+                .map(|x| x.analysis_window)
+                .filter(|x| *x > 0)
+                .unwrap_or(config.default_analysis_window),
+            max_bi_num: options
+                .map(|x| x.max_bi_num)
+                .filter(|x| *x > 0)
+                .unwrap_or(config.max_bi_num),
+            min_bi_len: options
+                .map(|x| x.min_bi_len)
+                .filter(|x| *x > 0)
+                .unwrap_or(config.min_bi_len),
+            derive_volume_proxy: config.derive_volume_proxy,
+            czsc_version: config.czsc_version.clone(),
+        }
+    }
+}
+
 /// 执行一次全量分析并生成快照（CPU 密集，由调用方放入阻塞线程池）。
-pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<AnalysisSnapshot> {
+pub fn build_snapshot(
+    request: &AnalyzeRequest,
+    params: &AnalysisParams,
+) -> Result<AnalysisSnapshot> {
     let options = request.options.as_ref();
     let data_len = request.data_len as usize;
     let series = request
@@ -61,11 +114,11 @@ pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<Anal
     let analysis_window = options
         .map(|x| x.analysis_window)
         .filter(|x| *x > 0)
-        .unwrap_or(state.config.default_analysis_window);
+        .unwrap_or(params.analysis_window);
 
     let freq = parse_freq(&request.freq_hint)?;
     let window_start = data_len.saturating_sub(analysis_window as usize);
-    let bars = build_raw_bars(request, freq, window_start, state.config.derive_volume_proxy)?;
+    let bars = build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
 
     if bars.is_empty() {
         bail!("bars are empty after applying analysis window");
@@ -74,11 +127,11 @@ pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<Anal
     let max_bi_num = options
         .map(|x| x.max_bi_num)
         .filter(|x| *x > 0)
-        .unwrap_or(state.config.max_bi_num) as usize;
+        .unwrap_or(params.max_bi_num) as usize;
     let min_bi_len = options
         .map(|x| x.min_bi_len)
         .filter(|x| *x > 0)
-        .unwrap_or(state.config.min_bi_len) as usize;
+        .unwrap_or(params.min_bi_len) as usize;
 
     let wants_signals = requested_func_ids.iter().any(|id| (401..=406).contains(id));
     let mut buy_sell_points = if wants_signals {
@@ -135,7 +188,7 @@ pub fn build_snapshot(request: &AnalyzeRequest, state: &AppState) -> Result<Anal
             min_bi_len: min_bi_len as u32,
             analysis_window,
             generated_at_unix_ms,
-            analyzer_version: state.config.czsc_version.clone(),
+            analyzer_version: params.czsc_version.clone(),
         }),
         channels,
         fractals: if include_objects {
@@ -228,15 +281,15 @@ fn validate_series_lengths(
 mod tests {
     use super::*;
     use crate::analyzer::fixtures::{
-        channel, nonzero_count, sample_request, test_state,
+        channel, nonzero_count, sample_request, test_params,
     };
     use crate::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 
     #[test]
     fn build_snapshot_populates_core_channels_and_objects() {
-        let state = test_state();
         let request = sample_request(true);
-        let snapshot = build_snapshot(&request, state.as_ref()).expect("snapshot should build");
+        let params = test_params(&request);
+        let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
 
         assert_eq!(snapshot.meta.as_ref().unwrap().data_len, request.data_len);
         assert_eq!(snapshot.channels.len(), 7);
@@ -298,10 +351,10 @@ mod tests {
 
     #[test]
     fn build_snapshot_with_signal_channels_does_not_panic() {
-        let state = test_state();
         let mut request = sample_request(false);
         request.requested_func_ids = vec![401, 402, 403, 404, 405, 406];
-        let snapshot = build_snapshot(&request, state.as_ref()).expect("snapshot should build");
+        let params = test_params(&request);
+        let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
 
         assert_eq!(snapshot.channels.len(), 6);
         for func_id in [401, 402, 403, 404, 405, 406] {
@@ -369,8 +422,8 @@ mod tests {
             caller_instance_id: 0,
         };
 
-        let state = test_state();
-        let snapshot = build_snapshot(&request, state.as_ref()).expect("snapshot should build");
+        let params = test_params(&request);
+        let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
 
         let fx_bottom = channel(&snapshot, 102);
         // 底分型必须落在极值K线（idx5，low=12.0），而不是合并组起点 idx3。
@@ -395,10 +448,10 @@ mod tests {
     /// 调试例程：分型/笔端点/笔向对照打印（配合 --nocapture 人工核对）。
     #[test]
     fn dump_channel_detail_consistency() {
-        let state = test_state();
         let mut request = sample_request(false);
         request.requested_func_ids = vec![101, 102, 201, 202, 301, 302, 303];
-        let snapshot = build_snapshot(&request, state.as_ref()).expect("snapshot");
+        let params = test_params(&request);
+        let snapshot = build_snapshot(&request, &params).expect("snapshot");
 
         let ch = |id: u32| snapshot.channels.iter().find(|c| c.func_id == id).unwrap();
         let fx_top = ch(101);

@@ -3,7 +3,7 @@
 //! 右边框，图上只剩左侧竖线、没有上下边框和右边框。
 //! 使用仓库内的真实数据 tests/data/002340_day.csv。
 
-use tdx_czsc_service::analyzer::build_snapshot;
+use tdx_czsc_service::analyzer::{build_snapshot, AnalysisParams};
 use tdx_czsc_service::config::AppConfig;
 use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
@@ -64,7 +64,8 @@ fn build_channels() -> (Vec<String>, tdx_czsc_service::proto::analysis::Analysis
     config.min_bi_len = 6;
     config.default_analysis_window = 1000;
     let state = AppState::new(config);
-    let snapshot = build_snapshot(&request, &state).expect("snapshot should build");
+    let params = AnalysisParams::from((&request, &state.config));
+    let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
 
     let boundary = snapshot
         .channels

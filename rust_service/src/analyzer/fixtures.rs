@@ -14,8 +14,9 @@ use chrono::{Duration, Utc};
 
 use crate::config::AppConfig;
 use crate::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
-use crate::state::AppState;
 use crate::proto::analysis::{AnalysisSnapshot, ChannelSeries};
+
+use super::AnalysisParams;
 
 /// 构造一笔（测试用）：start→end 单向运行，方向按涨跌自动判定。
 ///
@@ -132,11 +133,17 @@ pub(crate) fn sample_request(include_objects: bool) -> AnalyzeRequest {
     }
 }
 
-pub(crate) fn test_state() -> std::sync::Arc<AppState> {
+/// 测试用服务配置（min_bi_len=3、窗口 64，贴近样例请求）。
+pub(crate) fn test_config() -> AppConfig {
     let mut config = AppConfig::default();
     config.min_bi_len = 3;
     config.default_analysis_window = 64;
-    AppState::new(config)
+    config
+}
+
+/// 由样例请求 + 测试配置解析出的分析参数（`build_snapshot` 输入）。
+pub(crate) fn test_params(request: &AnalyzeRequest) -> AnalysisParams {
+    AnalysisParams::from((request, &test_config()))
 }
 
 pub(crate) fn channel(snapshot: &AnalysisSnapshot, func_id: u32) -> &ChannelSeries {

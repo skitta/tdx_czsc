@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-quality-gate:
+    name: Rust quality gate (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust_service
+
+      - name: rustfmt
+        working-directory: rust_service
+        run: cargo fmt -- --check
+
+      - name: clippy
+        working-directory: rust_service
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test
+        working-directory: rust_service
+        run: cargo test --all-targets
+
+  windows-tests:
+    name: Windows Rust tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: taiki-e/install-protoc-action@v1
+        with:
+          version: v27.3
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust_service
+
+      - name: test
+        working-directory: rust_service
+        run: cargo test --all-targets
+
+  # Bridge DLL 需要 vcpkg 提供的 protobuf C++ 运行时，CI 成本高，
+  # 构建与冒烟测试按 README 在本机 Windows x64 验证。

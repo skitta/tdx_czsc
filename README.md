@@ -273,7 +273,9 @@ cargo run --example analyze_csv -- ../tests/data/002340_day.csv 6
 | 文档 | 内容 |
 |---|---|
 | [`docs/技术方案_通达信缠论自动标注系统.md`](docs/技术方案_通达信缠论自动标注系统.md) | 总体方案：协议、通道设计、中枢/段绘制规则、配置与验收 |
-| [`docs/通达信DLL函数编程规范/`](docs/通达信DLL函数编程规范) | 通达信官方 DLL 编程规范与示例插件 |
+| [`docs/通达信DLL函数编程规范/`](docs/通达信DLL函数编程规范) | 通达信官方 DLL 编程规范与示例插件（**第三方材料，版权归官方**，见目录内 README） |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
+| [`SECURITY.md`](SECURITY.md) | 漏洞报告与安全注意事项 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献指南与 Rust 代码结构约定 |
 
 ---

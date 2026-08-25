@@ -2,7 +2,8 @@
 name = "tdx_czsc_service"
 version = "0.1.0"
 edition = "2024"
-description = "Local Rust analysis service for TDX CZSC bridge"
+description = "Local Rust analysis service for TDX CZSC bridge (缠论自动标注)"
+license = "MIT"
 build = "build.rs"
 
 [dependencies]

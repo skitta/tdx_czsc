@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-set(CMAKE_TOOLCHAIN_FILE "E:/DELL/Documents/Codes/vcpkg/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+# 提示：protobuf 由 vcpkg 提供。配置时如需 vcpkg 工具链，请用：
+#   cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+# （不再内置本机路径，避免绝对路径泄露与不可移植。）
 project(tdx_czsc_bridge LANGUAGES CXX)
 
 if(NOT WIN32)

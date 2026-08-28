@@ -69,7 +69,13 @@ flowchart LR
   含锚点对齐、信号去重与三买/三卖按中枢严格化
 - ✅ **量能背驰**：950 量能输入通道融合真实 VOL；未挂载时自动以振幅代理量兜底
 - ✅ **Windows 全链路**：Named Pipe 服务 + 自动拉起/退出回收（Job Object）+ 冒烟测试
-- ✅ **公式模板**：综合主图模板 `tdx_formula_examples/main_chart_full.tn6`
+- ✅ **公式模板**：结构主图模板 `tdx_formula_examples/main_chart_full.tn6`
+  （分型/笔/中枢/段）+ 买卖点专家系统指示 `tdx_formula_examples/buy_sell_expert.tn6`
+  （401~406 → ENTERLONG/EXITLONG 买卖信号，可回测；B/S 箭头由系统绘制，
+  类型文字标注见 `buy_sell_mark.tn6`）
+- ✅ **ATR 止盈止损模板**：`tdx_formula_examples/atr_tp_sl.tn6`（一买/二买/三买
+  各自独立成段、互不合并：每类买点各画一对 ATR 动态止盈/止损线，可同时并存；
+  K 线穿线即终止该类线的绘画；仅 4 个参数，含影子回归测试）
 
 ---
 
@@ -146,12 +152,36 @@ build\Release\tdx_czsc_ipc_smoke_test.exe   # 先跑控制台 IPC 测试
 
 ### 4. 通达信公式模板
 
-在通达信中加载 `tdx_formula_examples/main_chart_full.tn6`（综合主图模板，含
-分型/笔/中枢/买卖点标注），切换到带量能的周期数据即可看到标注结果。
+在通达信中加载 `tdx_formula_examples/main_chart_full.tn6`（结构主图模板：
+分型/笔/中枢/段标注；买卖点已剥离为独立脚本），切换到带量能的周期数据即可
+看到标注结果。
 
-> 量能提示：如需一买/一卖使用**真实量能**，公式需额外调用量能通道
-> `TDXDLL1(950, HIGH, LOW, VOL)`（放在 401~406 之前）；未挂载时服务端自动
-> 以振幅代理量兜底（可经配置关闭）。
+买卖点专家系统指示：新建"交易系统"（专家系统）公式并导入
+`tdx_formula_examples/buy_sell_expert.tn6`，叠加到主图后，一买/二买/三买处
+自动标注 B 箭头（买入指示 ENTERLONG），一卖/二卖/三卖处标注 S 箭头（卖出
+指示 EXITLONG），并可在通达信"系统指示/回测"功能中使用；公式内含 950 量能
+通道调用，恢复一买/一卖的真实量能背驰维度。注意：专家系统公式**不允许使用
+绘图函数**（否则报"TDXSTEPxx 不是指定的输出名"错误），B/S 箭头由通达信自动
+绘制；如需 `'一买'/'一卖'` 等类型文字标注，再以"技术指标/主图叠加"导入
+`tdx_formula_examples/buy_sell_mark.tn6` 配合使用。
+
+> 量能提示：`buy_sell_expert.tn6` 已内置量能通道调用（`TDXDLL1(950, HIGH,
+> LOW, VOL)` 放在 401~406 之前），恢复一买/一卖的真实量能背驰维度；
+> `atr_tp_sl.tn6` 未挂载量能通道时，服务端自动以振幅代理量兜底（可经配置关闭）。
+
+买点 ATR 动态止盈止损模板：加载 `tdx_formula_examples/atr_tp_sl.tn6`（主图叠加，
+依赖 401/403/405 买点通道）。**一买/二买/三买各自独立成段**，每类买点从自己的
+锚点起画一对 ATR 动态线、互不合并，三条止盈线三条止损线可同时并存：
+
+- 动态止损线（吊灯式，**价格下方**，下穿离场）：`HHV(高 - K1×ATR, 买入以来)`，
+  随新高上移；
+- 动态止盈线（目标价式，**价格上方**，上穿离场）：`HHV(前高 + K2×ATR, 买入以来)`
+  （前高 = 买入以来最高、不含当前 K 线），随每次创新高跳升上移、只升不降。
+
+K 线上穿止盈线或下穿止损线即终止该买点的线（不输出文字/图标；买入 bar 自身不参与
+穿线判定，保证线从买入处可见），同类新买点出现后重开新段；**只画止盈止损线，
+不含缠论结构线**；参数仅 4 个（ATR 周期/止损倍数/止盈倍数/触发方式），改数字
+即可调整。
 
 ---
 
@@ -195,7 +225,7 @@ tdx_czsc/
 │   ├── examples/analyze_csv.rs # 离线 CSV 分析工具（脱离通达信验证算法）
 │   └── tests/                  # 真实数据回归测试（通路/段/中枢/信号/背驰）
 ├── bridge_dll/                 # x64 C++ DLL（通达信加载）+ 冒烟测试 + ini 样例
-├── tdx_formula_examples/       # 通达信公式模板
+├── tdx_formula_examples/       # 通达信公式模板（main_chart_full / atr_tp_sl / buy_sell_expert / buy_sell_mark）
 ├── tests/data/                 # 回归测试真实行情 CSV
 ├── docs/                       # 技术方案 + 通达信 DLL 编程规范
 ├── deploy_to_tdx.bat           # 一键部署：构建服务与 DLL 并拷贝到通达信

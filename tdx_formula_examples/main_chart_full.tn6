@@ -1,4 +1,6 @@
-{ 主图综合模板(完整版): 分型 + 笔 + 段 + 中枢 + 买卖点 + 服务调试 }
+{ 主图综合模板(结构版): 分型 + 笔 + 段 + 中枢 }
+{ 买卖点已剥离为独立脚本: 见 buy_sell_expert.tn6 (通达信专家系统指示) }
+{ 服务调试(902/903通道)已注释, 需要时取消注释即可恢复 }
 { 前提: DLL 已绑定编号 1; 否则把 TDXDLL1 改为对应编号 }
 { 导入后请在公式属性中设置为: 主图叠加 }
 
@@ -6,14 +8,9 @@
 { 笔/段/中枢为缠论核心结构, 默认始终显示, 不设开关 }
 分型开关:=1;
 段开关:=1;
-买卖开关:=1;
-调试开关:=1;
+{ 调试开关:=1; }   { 已注释: 调试功能默认关闭 }
 
 { ==== 通道读取 (中间变量, 不画线) ==== }
-{ 量能通道 950: 把 VOL 传给 DLL 融合进分析, 恢复一买/一卖的真实量能背驰维度 }
-{ 注意: 本行必须出现在下方 401~406 调用之前(通达信按公式文本顺序求值); }
-{ 若顺序颠倒, DLL 的段指纹缓存会在下一轮刷新后命中, 效果同样生效 }
-量能:=TDXDLL1(950,HIGH,LOW,VOL);
 顶分:=TDXDLL1(101,HIGH,LOW,CLOSE);
 底分:=TDXDLL1(102,HIGH,LOW,CLOSE);
 笔端:=TDXDLL1(201,HIGH,LOW,CLOSE);
@@ -23,33 +20,19 @@
 中枢上:=TDXDLL1(301,HIGH,LOW,CLOSE);
 中枢下:=TDXDLL1(302,HIGH,LOW,CLOSE);
 中枢界:=TDXDLL1(304,HIGH,LOW,CLOSE);
-一买:=TDXDLL1(401,HIGH,LOW,CLOSE);
-一卖:=TDXDLL1(402,HIGH,LOW,CLOSE);
-二买:=TDXDLL1(403,HIGH,LOW,CLOSE);
-二卖:=TDXDLL1(404,HIGH,LOW,CLOSE);
-三买:=TDXDLL1(405,HIGH,LOW,CLOSE);
-三卖:=TDXDLL1(406,HIGH,LOW,CLOSE);
-服务:=TDXDLL1(902,HIGH,LOW,CLOSE);
-耗时:=TDXDLL1(903,HIGH,LOW,CLOSE);
+{ 服务:=TDXDLL1(902,HIGH,LOW,CLOSE); }   { 已注释: 调试通道(服务状态) }
+{ 耗时:=TDXDLL1(903,HIGH,LOW,CLOSE); }   { 已注释: 调试通道(最近请求耗时) }
 
 { ==== 间距单位: 平均K线振幅(周期自适应) ==== }
-{ 所有标记(分型文字/买卖点图标与文字)的偏移都按"振幅"的倍数计算: }
-{ 振幅 = MA(HIGH-LOW,10) 即平均单根K线高度, 随周期自动缩放 —— 日线振幅大、 }
-{ 5分钟振幅小, 偏移量同比缩放, 各周期图上标记与K线的相对距离保持一致 }
-{ 间距倍数可调: 改下面两个系数即可整体调整松紧 }
+{ 所有标记(分型文字)的偏移都按"振幅"的倍数计算: }
+{ 振幅 = MA(HIGH-LOW,10) 即平均单根K线高度, 随周期自动缩放 }
 振幅:=MA(HIGH-LOW,10);
-图标距:=振幅*0.3;   { 图标中心到K线边缘: 紧贴 }
-文字距:=振幅*1.0;   { 文字在图标外侧, 间隔约0.4振幅 }
-有买点:=一买>0 OR 二买>0 OR 三买>0;
-有卖点:=一卖>0 OR 二卖>0 OR 三卖>0;
-有买卖:=(有买点 OR 有卖点) AND 买卖开关=1;
 
 { ==== 分型: 顶/底图标 + 文字(上下错开0.45振幅) ==== }
-{ 有买卖点的K线让位: 该位置由买卖点图标+文字标记, 不再重复画顶/底 }
-DRAWICON(顶分>0 AND 分型开关=1 AND 有买卖=0,顶分,2);
-DRAWICON(底分>0 AND 分型开关=1 AND 有买卖=0,底分,1);
-DRAWTEXT(顶分>0 AND 分型开关=1 AND 有买卖=0,顶分+振幅*0.45,'顶'),COLORGREEN;
-DRAWTEXT(底分>0 AND 分型开关=1 AND 有买卖=0,底分-振幅*0.45,'底'),COLORYELLOW;
+DRAWICON(顶分>0 AND 分型开关=1,顶分,2);
+DRAWICON(底分>0 AND 分型开关=1,底分,1);
+DRAWTEXT(顶分>0 AND 分型开关=1,顶分+振幅*0.45,'顶'),COLORGREEN;
+DRAWTEXT(底分>0 AND 分型开关=1,底分-振幅*0.45,'底'),COLORYELLOW;
 
 { ==== 笔: 相邻端点连线(红=向上笔 绿=向下笔) + 端点标记 ==== }
 { 端点类型用 101/102 分型通道判断(笔向202在末端点方向不可靠) }
@@ -80,24 +63,8 @@ STICKLINE(中枢界=1,中枢下,中枢上,1,0),COLORBLUE;
 STICKLINE(中枢界=2,中枢下,中枢上,1,0),COLORBLUE;
 STICKLINE(中枢界=3,MIN(中枢下,REF(中枢下,1)),MAX(中枢上,REF(中枢上,1)),1,0),COLORBLUE;
 
-{ ==== 买卖点: 图标紧贴K线上/下缘(∓图标距), 文字在图标外侧(∓文字距) ==== }
-{ 买点在K线下方(下缘)、卖点在K线上方(上缘); 偏移按振幅缩放, 各周期观感一致 }
-DRAWICON(一买>0 AND 买卖开关=1,一买-图标距,1);
-DRAWICON(一卖>0 AND 买卖开关=1,一卖+图标距,2);
-DRAWICON(二买>0 AND 买卖开关=1,二买-图标距,1);
-DRAWICON(二卖>0 AND 买卖开关=1,二卖+图标距,2);
-DRAWICON(三买>0 AND 买卖开关=1,三买-图标距,1);
-DRAWICON(三卖>0 AND 买卖开关=1,三卖+图标距,2);
-
-{ 文字: 买点在图标下方, 卖点在图标上方 }
-DRAWTEXT(一买>0 AND 买卖开关=1,一买-文字距,'一买'),COLORFF0000;
-DRAWTEXT(一卖>0 AND 买卖开关=1,一卖+文字距,'一卖'),COLOR00FF00;
-DRAWTEXT(二买>0 AND 买卖开关=1,二买-文字距,'二买'),COLORFF00FF;
-DRAWTEXT(二卖>0 AND 买卖开关=1,二卖+文字距,'二卖'),COLOR00AA00;
-DRAWTEXT(三买>0 AND 买卖开关=1,三买-文字距,'三买'),COLORYELLOW;
-DRAWTEXT(三卖>0 AND 买卖开关=1,三卖+文字距,'三卖'),COLOR00FFFF;
-
-{ ==== 服务调试: 最后一根K线显示服务状态与最近耗时 ==== }
-DRAWTEXT(ISLASTBAR AND 服务>0 AND 调试开关=1,CLOSE*1.03,'SERVICE_READY'),COLORGREEN;
-DRAWTEXT(ISLASTBAR AND 服务=0 AND 调试开关=1,CLOSE*1.03,'SERVICE_DOWN'),COLORRED;
-DRAWNUMBER(ISLASTBAR AND 调试开关=1,CLOSE*1.06,耗时),COLORWHITE;
+{ ==== 服务调试 (已注释: 需要时取消注释即可恢复) ==== }
+{ 最后一根K线显示服务状态与最近耗时 }
+{ DRAWTEXT(ISLASTBAR AND 服务>0 AND 调试开关=1,CLOSE*1.03,'SERVICE_READY'),COLORGREEN; }
+{ DRAWTEXT(ISLASTBAR AND 服务=0 AND 调试开关=1,CLOSE*1.03,'SERVICE_DOWN'),COLORRED; }
+{ DRAWNUMBER(ISLASTBAR AND 调试开关=1,CLOSE*1.06,耗时),COLORWHITE; }

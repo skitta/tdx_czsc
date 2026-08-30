@@ -3,6 +3,35 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.7.0] - 2026-08
+
+**代码清理（chore/cleanup）**——三档：死代码/冗余清理 + 协议字段移除 + 微优化。
+冒烟测试管道环节受本会话沙箱限制，协议字段移除（第二档）请随下次部署真机复验。
+
+### 第一档：死配置/死依赖/测试辅助收敛
+
+- 删 `bytes` 死依赖（全仓无引用）与 `AppConfig.request_timeout_ms` 死配置
+  （服务端无读取点，超时全在 DLL 侧与 IPC 层）；
+- `SnapshotCache::is_empty` 保留（clippy `len_without_is_empty` 强制配对）；
+- tests：`common` 新增 `load_raw_bars`（CSV→RawBar，全局 id/真实日期）与
+  `analyze_request_ex`（max_bi_num 定制），`signal_regression` /
+  `signals_fast_parity` / `incremental_regression` 收敛统一辅助，消除
+  三份近同 CSV 解析与本地请求构造。
+
+### 第二档：协议未使用字段移除（proto + Rust + DLL 两端同步）
+
+- `AnalyzeRequest.bar_build_mode` / `caller_instance_id`（+ `BarBuildMode`
+  enum）与 `CzscOptions.include_channels`：扫描确认无任何服务端读取，
+  全部构造点/导入/设置点清理；prost 重新生成、DLL cmake Release 编译通过；
+- `CzscOptions.enable_incremental` 保留（服务端配置默认开启，字段预留）。
+
+### 第三档：微优化
+
+- `signals_fast` need_init 判定的 `existing.ids.contains`（O(N)）→
+  二分 `ids_contains`（O(log N)，id 序列单调递增，位级等价；对照测试
+  全绿）；
+- `analyze_csv` 双遍分析补充注释（区分"直连演化剖面"与"快照装配剖面"）。
+
 ## [0.6.0] - 2026-08
 
 **P1：并行 + 异步优化**——纯 `rust_service` 侧改动，不动协议与 DLL。

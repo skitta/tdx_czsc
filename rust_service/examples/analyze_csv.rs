@@ -109,8 +109,10 @@ fn main() -> Result<()> {
     )
     .expect("bars");
     let t1 = std::time::Instant::now();
-    // 单遍演化（P0）：信号侧演化 CZSC 的同时产出完整结构（笔），
-    // 复用其终态作诊断，不再单独 CZSC::new 第二遍。
+    // 第 1 遍：直连演化剖面（不经 build_snapshot），供诊断"最后一笔详情"；
+    // 注意：随后 build_snapshot_profiled 会再跑第 2 遍完整分析——
+    // 因此主耗时数字以 build_snapshot_profiled 输出的剖面为准，
+    // 本段只用于对照"纯演化"与"快照装配"的差异。
     let (czsc, _points) =
         tdx_czsc_service::analyzer::compute_buy_sell_points(&bars, 1000, min_bi_len);
     let t2 = std::time::Instant::now();

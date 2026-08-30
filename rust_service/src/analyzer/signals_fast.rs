@@ -80,7 +80,7 @@ impl MaSeriesCache {
             Some(existing) => {
                 now_len < timeperiod + 15
                     || existing.ids.is_empty()
-                    || !existing.ids.contains(&bar_ids[now_len - 2])
+                    || !ids_contains(&existing.ids, bar_ids[now_len - 2])
             }
         };
         if need_init {
@@ -223,6 +223,13 @@ fn locate_bar(czsc: &CZSC, id: i32) -> Option<usize> {
     let bars = &czsc.bars_raw;
     let idx = bars.partition_point(|b| b.id < id);
     (idx < bars.len() && bars[idx].id == id).then_some(idx)
+}
+
+/// 升序 id 序列的成员判定（O(log N)；对齐原实现 `contains` 的 O(N) 语义，
+/// 位级等价——id 序列单调递增）。
+fn ids_contains(ids: &[i32], id: i32) -> bool {
+    let idx = ids.partition_point(|x| *x < id);
+    idx < ids.len() && ids[idx] == id
 }
 
 /// 快速实现：`cxt_second_bs_V230320`（均线辅助二买/二卖，末 5 笔）。

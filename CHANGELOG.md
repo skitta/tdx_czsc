@@ -3,6 +3,19 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.8.0] - 2026-08
+
+**P2：内存/编译微优化**（实测驱动决策）。
+
+### 变更
+
+- `[profile.release] strip="debuginfo"`（零编译代价，减小部署体积）；
+- **thin LTO + codegen-units=1 实测后弃用**：全量快照 170→160ms（约 5%），
+  release 构建 31s → 6m49s（10 倍）——本项目 release 构建伴随每次部署/
+  验证迭代，负收益；决策与依据记录于 `Cargo.toml` 与 `docs/技术方案` §11.3；
+- 内存侧评估（无改动）：RawBar 逐根克隆属 czsc-core 依赖内行为
+  （外层省 1/3 改动面大、收益小）；增量状态双份 K 线为前缀校验设计必需。
+
 ## [0.7.0] - 2026-08
 
 **代码清理（chore/cleanup）**——三档：死代码/冗余清理 + 协议字段移除 + 微优化。

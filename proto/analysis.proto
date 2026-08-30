@@ -132,20 +132,6 @@ enum SignalKind {
   SIGNAL_SELL3 = 6;
 }
 
-enum BarBuildMode {
-  BAR_BUILD_MODE_UNSPECIFIED = 0;
-
-  // 第一版推荐：open = close，vol/amount=0，dt 由 index 推导
-  BAR_BUILD_FROM_HLC3 = 1;
-
-  // 后续扩展：请求中若提供 open/high/low/close 则按 OHLC 构造
-  BAR_BUILD_FROM_OHLC = 2;
-}
-
-// =========================
-// Analyze
-// =========================
-
 message AnalyzeRequest {
   // 分析分组，供服务端和 DLL 做缓存管理。
   // 例："single_level_structure" / "single_level_signals"
@@ -167,9 +153,6 @@ message AnalyzeRequest {
   // DLL 预计算的数据摘要，用于缓存命中
   fixed64 input_hash = 6;
 
-  // K 线构造模式
-  BarBuildMode bar_build_mode = 7;
-
   // 由 DLL 透传的原始序列。第一版至少提供 high / low / close。
   MarketSeries series = 8;
 
@@ -178,9 +161,6 @@ message AnalyzeRequest {
 
   // DLL 是否更偏向缓存结果；true 表示服务可优先返回缓存快照
   bool prefer_cached = 10;
-
-  // 调用侧实例 ID，便于未来多图表/多窗口做更细粒度缓存
-  uint64 caller_instance_id = 11;
 }
 
 message AnalyzeResponse {
@@ -212,16 +192,13 @@ message CzscOptions {
   uint32 max_bi_num = 1;
   uint32 min_bi_len = 2;
 
-  // 实际参与分析的窗口长度；0 表示服务端自行决定
+  // 实际参与分析的窗口长度；0 表示全量（默认），正数取尾部 N 根
   uint32 analysis_window = 3;
-
-  // 是否返回 channels
-  bool include_channels = 4;
 
   // 是否返回结构化 objects；调试期建议开启，正式期可按需关闭
   bool include_objects = 5;
 
-  // 预留：是否启用增量分析
+  // 预留：是否启用增量分析（服务端默认开启，见 AppConfig.enable_incremental）
   bool enable_incremental = 6;
 }
 

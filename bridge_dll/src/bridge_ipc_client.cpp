@@ -86,9 +86,7 @@ void BuildAnalyzeEnvelope(const AnalyzeRequestCpp& request, tdx::czsc::v1::Reque
     analyze->set_freq_hint(request.freq_hint);
     analyze->set_data_len(request.data_len);
     analyze->set_input_hash(request.input_hash);
-    analyze->set_bar_build_mode(tdx::czsc::v1::BAR_BUILD_FROM_HLC3);
     analyze->set_prefer_cached(request.prefer_cached);
-    analyze->set_caller_instance_id(request.caller_instance_id);
 
     auto* series = analyze->mutable_series();
     FillRepeatedFloat(request.high, series->mutable_high());
@@ -100,7 +98,6 @@ void BuildAnalyzeEnvelope(const AnalyzeRequestCpp& request, tdx::czsc::v1::Reque
     options->set_max_bi_num(request.options.max_bi_num);
     options->set_min_bi_len(request.options.min_bi_len);
     options->set_analysis_window(request.options.analysis_window);
-    options->set_include_channels(request.options.include_channels);
     options->set_include_objects(request.options.include_objects);
     options->set_enable_incremental(request.options.enable_incremental);
 }

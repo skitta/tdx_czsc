@@ -21,7 +21,7 @@ use prost::Message;
 
 use tdx_czsc_service::analyzer::build_snapshot_profiled;
 use tdx_czsc_service::config::AppConfig;
-use tdx_czsc_service::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
+use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
 
 const CHANNEL_NAMES: &[(u32, &str)] = &[
@@ -83,18 +83,15 @@ fn main() -> Result<()> {
         freq_hint,
         data_len: close,
         input_hash: 0xCAFEBABE,
-        bar_build_mode: BarBuildMode::BarBuildFromHlc3 as i32,
         series: Some(series),
         options: Some(CzscOptions {
             max_bi_num: 1000,
             min_bi_len: min_bi_len as u32,
             analysis_window,
-            include_channels: true,
             include_objects: true,
             enable_incremental: false,
         }),
         prefer_cached: false,
-        caller_instance_id: 0,
     };
 
     let started = std::time::Instant::now();

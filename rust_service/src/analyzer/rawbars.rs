@@ -154,7 +154,7 @@ fn synthetic_freq_step(freq: Freq, index: i64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::analysis::{BarBuildMode, CzscOptions};
+    use crate::proto::analysis::CzscOptions;
 
     fn sample_request() -> AnalyzeRequest {
         let close: Vec<f32> = (0..64).map(|i| 10.0 + (i % 7) as f32 * 0.5).collect();
@@ -167,7 +167,6 @@ mod tests {
             freq_hint: "F30".to_string(),
             data_len: close.len() as u32,
             input_hash: 0,
-            bar_build_mode: BarBuildMode::BarBuildFromHlc3 as i32,
             series: Some(MarketSeries {
                 open: Vec::new(),
                 high,
@@ -179,7 +178,6 @@ mod tests {
             }),
             options: Some(CzscOptions::default()),
             prefer_cached: false,
-            caller_instance_id: 0,
         }
     }
 

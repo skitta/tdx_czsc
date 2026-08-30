@@ -14,7 +14,7 @@ use chrono::{Duration, Utc};
 
 use crate::config::AppConfig;
 use crate::proto::analysis::{AnalysisSnapshot, ChannelSeries};
-use crate::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
+use crate::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 
 use super::AnalysisParams;
 
@@ -109,7 +109,6 @@ pub(crate) fn sample_request(include_objects: bool) -> AnalyzeRequest {
         freq_hint: "F30".to_string(),
         data_len: close.len() as u32,
         input_hash: 0xAABBCCDD,
-        bar_build_mode: BarBuildMode::BarBuildFromHlc3 as i32,
         series: Some(MarketSeries {
             open: Vec::new(),
             high,
@@ -123,12 +122,10 @@ pub(crate) fn sample_request(include_objects: bool) -> AnalyzeRequest {
             max_bi_num: 50,
             min_bi_len: 3,
             analysis_window: 64,
-            include_channels: true,
             include_objects,
             enable_incremental: false,
         }),
         prefer_cached: false,
-        caller_instance_id: 7,
     }
 }
 

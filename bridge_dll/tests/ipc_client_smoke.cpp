@@ -110,11 +110,9 @@ int main() {
     request.data_len = static_cast<std::uint32_t>(kLen);
     request.input_hash = 0x1122334455667788ULL;
     request.prefer_cached = false;
-    request.caller_instance_id = 42;
     request.options.max_bi_num = 50;
     request.options.min_bi_len = 3;
     request.options.analysis_window = static_cast<std::uint32_t>(kLen);
-    request.options.include_channels = true;
     request.options.include_objects = false;
     request.options.enable_incremental = false;
 

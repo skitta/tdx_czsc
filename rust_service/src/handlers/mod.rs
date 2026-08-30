@@ -97,18 +97,15 @@ mod tests {
                 freq_hint: "D".to_string(),
                 data_len: series.close.len() as u32,
                 input_hash: 0,
-                bar_build_mode: crate::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
                 series: Some(series),
                 options: Some(crate::proto::analysis::CzscOptions {
                     max_bi_num: 50,
                     min_bi_len: 6,
                     analysis_window: 100,
-                    include_channels: true,
                     include_objects: false,
                     enable_incremental: false,
                 }),
                 prefer_cached: false,
-                caller_instance_id: 0,
             })),
         };
         let state = AppState::new(AppConfig::default());

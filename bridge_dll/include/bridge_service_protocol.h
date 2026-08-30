@@ -12,7 +12,6 @@ struct AnalyzeOptions {
     uint32_t min_bi_len = 6;
     /// 0 = 全量（默认）；正数 = 尾部 N 根窗口。
     uint32_t analysis_window = 0;
-    bool include_channels = true;
     bool include_objects = false;
     bool enable_incremental = false;
 };
@@ -27,7 +26,6 @@ struct AnalyzeRequestCpp {
     uint32_t data_len = 0;
     uint64_t input_hash = 0;
     bool prefer_cached = true;
-    uint64_t caller_instance_id = 0;
     AnalyzeOptions options;
     std::vector<float> high;
     std::vector<float> low;

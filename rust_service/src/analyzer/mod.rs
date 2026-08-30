@@ -543,7 +543,6 @@ mod tests {
             freq_hint: "D".to_string(),
             data_len: highs.len() as u32,
             input_hash: 0,
-            bar_build_mode: crate::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
             series: Some(MarketSeries {
                 open: Vec::new(),
                 high: highs.to_vec(),
@@ -557,12 +556,10 @@ mod tests {
                 max_bi_num: 50,
                 min_bi_len: 6,
                 analysis_window: 0, // 0 -> 使用 state 默认值 64，窗口覆盖全部 8 根
-                include_channels: true,
                 include_objects: false,
                 enable_incremental: false,
             }),
             prefer_cached: false,
-            caller_instance_id: 0,
         };
 
         let params = test_params(&request);

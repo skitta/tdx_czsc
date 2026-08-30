@@ -334,7 +334,6 @@ mod tests {
             freq_hint: "F30".to_string(),
             data_len: close.len() as u32,
             input_hash: 0x22334455,
-            bar_build_mode: crate::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
             series: Some(MarketSeries {
                 open: Vec::new(),
                 high,
@@ -348,12 +347,10 @@ mod tests {
                 max_bi_num: 50,
                 min_bi_len: 3,
                 analysis_window: 64,
-                include_channels: true,
                 include_objects: false,
                 enable_incremental: false,
             }),
             prefer_cached,
-            caller_instance_id: 99,
         }
     }
 

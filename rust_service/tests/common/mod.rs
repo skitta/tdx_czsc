@@ -6,7 +6,7 @@
 use czsc_core::objects::bar::{RawBar, RawBarBuilder};
 use czsc_core::objects::freq::Freq;
 use tdx_czsc_service::config::AppConfig;
-use tdx_czsc_service::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
+use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 
 /// 读取仓库数据 CSV（`日期,开,高,低,收,...`），返回 (日期, high, low, close)。
 /// `#[allow(dead_code)]`：各测试二进制独立编译，个别测试只用 `analyze_request`。
@@ -128,7 +128,6 @@ pub fn analyze_request_ex(
         freq_hint: freq_hint.to_string(),
         data_len,
         input_hash: 0,
-        bar_build_mode: BarBuildMode::BarBuildFromHlc3 as i32,
         series: Some(MarketSeries {
             open: Vec::new(),
             high,
@@ -142,12 +141,10 @@ pub fn analyze_request_ex(
             max_bi_num,
             min_bi_len,
             analysis_window,
-            include_channels: true,
             include_objects,
             enable_incremental: false,
         }),
         prefer_cached: false,
-        caller_instance_id: 7,
     }
 }
 

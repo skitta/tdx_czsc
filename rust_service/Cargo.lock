@@ -3139,7 +3139,6 @@ name = "tdx_czsc_service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
  "czsc-core",
  "czsc-signals",

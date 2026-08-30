@@ -21,6 +21,9 @@ pub struct AppConfig {
     /// 增量状态缓存容量（每条目持有演化中的 CZSC，含完整窗口 K 线；
     /// 大窗口下按内存敏感配置调小）。
     pub incremental_cache_capacity: usize,
+    /// 服务端同时执行的全量分析并发上限（P1 参数化）：多窗口/多周期/
+    /// 多标的场景可调大（如 4~8）；增量承接与缓存命中不占槽位。
+    pub analysis_parallelism: usize,
     /// 通达信公式未挂量能通道（func_id 950）时，vol 缺失导致一买/一卖
     /// 的"量能背驰"恒不成立。开启后以单根K线相对振幅 (high-low)/close×100
     /// 派生代理量，恢复"价格背驰 AND（量能 OR 长度）"判定；有真实
@@ -42,6 +45,7 @@ impl Default for AppConfig {
             cache_capacity: 64,
             enable_incremental: true,
             incremental_cache_capacity: 8,
+            analysis_parallelism: 4,
             derive_volume_proxy: true,
         }
     }

@@ -10,12 +10,12 @@ use crate::analyzer::IncrementalCache;
 use crate::cache::{CacheKey, SnapshotCache};
 use crate::config::AppConfig;
 
-/// 服务端同时执行的全量分析数上限。
-///
-/// `build_snapshot` 在 spawn_blocking 线程池运行，是 CPU 密集计算；
-/// 限制并发数避免多窗口同时首刷把 CPU 打满后全部超时
+/// 服务端同时执行的全量分析并发上限由 `AppConfig::analysis_parallelism`
+/// （默认 4）决定。`build_snapshot` 在 spawn_blocking 线程池运行，是 CPU
+/// 密集计算；限制并发数避免多窗口同时首刷把 CPU 打满后全部超时
 /// （配合 DLL 侧 request_timeout_ms 与同数据段合并）。
-pub const MAX_CONCURRENT_ANALYSES: usize = 2;
+///
+/// 增量承接（`IncrementalCache` 命中）与 singleflight 等待不占槽位。
 
 #[derive(Debug)]
 pub struct AppState {
@@ -37,6 +37,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Arc<Self> {
+        let analysis_parallelism = config.analysis_parallelism;
         Arc::new(Self {
             cache: RwLock::new(SnapshotCache::new(config.cache_capacity)),
             incremental: Mutex::new(IncrementalCache::new(config.incremental_cache_capacity)),
@@ -44,7 +45,7 @@ impl AppState {
             started_at: Instant::now(),
             active_requests: AtomicU32::new(0),
             in_flight: Mutex::new(HashMap::new()),
-            analysis_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_ANALYSES)),
+            analysis_slots: Arc::new(Semaphore::new(analysis_parallelism)),
             total_analyses: AtomicU64::new(0),
         })
     }

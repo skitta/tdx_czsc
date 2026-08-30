@@ -3,6 +3,29 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.9.0] - 2026-08
+
+**预留清理 + 配置加载**（按用户原则：非用户提出/同意的功能不再预留）。
+
+### 变更
+
+- **协议死字段移除**：`STATUS_UNSUPPORTED_VERSION/TIMEOUT/SERVICE_BUSY`
+  三状态码（服务端无产生路径）、`HealthRequest.verbose`（无消费方）、
+  `TimingStats.build_bars_ms/map_channels_ms`（恒 0）、proto 的
+  java/go/csharp 生成 option（prost 不需要）、`requested_func_ids`
+  空集默认分支（DLL 恒传全量）；
+- **移除 `symbol_hint` 预留通道**：`AnalyzeRequest.symbol_hint` 与
+  `SnapshotMeta.symbol` 从协议删除（DLL 恒发占位符、无多标的通路），
+  Rust RawBar 符号恒定 `"TDX"`；测试辅助 `analyze_request(_ex)` 同步
+  去掉 symbol 参数与全部调用点；
+- **服务端配置加载**：`AppConfig` 支持 exe 同目录 `tdx_czsc_service.ini`
+  （UTF-8，风格对齐 DLL 侧）与 `TDX_CZSC_*` 环境变量，INI 不存在静默
+  回退默认值（此前服务端独有参数只能改代码重编译）；附
+  `rust_service/tdx_czsc_service.ini.example`；
+- 协议字段移除涉及 DLL 与服务端两端同步（构建时由
+  `protobuf_generate_cpp` 重新生成），请随下次部署真机复验；
+- 修正技术方案 §10.1 残留的已删键 `request_timeout_ms`。
+
 ## [0.8.0] - 2026-08
 
 **P2：内存/编译微优化**（实测驱动决策）。

@@ -53,34 +53,20 @@ pub use fast::{MaSeriesCache, second_bs_fast, third_bs_fast};
 
 mod fast {
     //! 快速信号路径（P1）：`cxt_second_bs_V230320` / `cxt_third_bs_V230318`
-    //! 的 O(log N) 重实现。
+    //! 的 O(log N) 重实现（原实现每次评估重建 O(N) `bar_index_map` 与全量
+    //! MA 映射，信号评估占全量分析 ~87%）。
     //!
-    //! # 动机（剖面实测）
-    //! 信号评估占全量分析约 87%（3933 根日线 227ms/262ms 演化段）。原
-    //! czsc-signals 实现每次评估都：
-    //!
-    //! - `bar_index_map` 重建 O(N) 的 `id → idx` HashMap；
-    //! - `update_ma_cache` 增量分支重建 O(N) 的"id → 旧 MA"映射并对全序列
-    //!   拷贝，再重算尾部窗口。
-    //!
-    //! 本实现以 **O(1) 追加判定 + O(log N) 二分定位 + 尾部窗口重算** 替代。
-    //!
-    //! # 位级一致性保证（对照测试 `signals_fast_parity` 锁定）
-    //!
-    //! - `calc_sma_cache_style` 的 TA-Lib 累计顺序（`sum -= old; sum += new`）
-    //!   与**无** 4 位小数舍入——逐字复刻（`ma_cache_style_sma`）；
-    //! - `update_ma_cache` 的增量语义：旧值按 id 对齐到新序列、尾部
-    //!   `min(timeperiod+10, len)` 窗口整段重算并覆盖最后 5 值；
-    //! - `ma_snapshot_value` 的快照重算语义：同 id close 不一致时以"仅替换
-    //!   该 id close"的序列重算 MA（窗口按位置顺序求和，加法顺序与滚动
-    //!   累计一致→位级一致），并按 id 缓存本轮结果；
-    //! - 信号字符串经官方 `make_kline_signal_v1` 构造，格式逐位一致。
-    //!
-    //! 仅实现 SMA 路径（默认 `ma_type=SMA`；当前调用方参数恒为空）。
+    //! **位级一致性**（对照测试 `signals_fast_parity` 逐字符锁定）：
+    //! `ma_cache_style_sma` 复刻 TA-Lib 累计顺序（`sum -= old; sum += new`，
+    //! 无 4 位舍入）；`ma_series` 复刻 `update_ma_cache` 增量语义（尾部
+    //! `min(tp+10, len)` 窗口整段重算并覆盖最后 5 值）；`snapshot_at`
+    //! 复刻 `ma_snapshot_value` 快照重算（窗口按位置顺序求和）；信号字符串
+    //! 经官方 `make_kline_signal_v1` 构造。仅实现 SMA 路径（默认参数）。
 
     use std::collections::HashMap;
 
     use czsc_core::analyze::CZSC;
+    use czsc_core::objects::bi::BI;
     use czsc_core::objects::direction::Direction;
     use czsc_core::objects::signal::Signal;
     use czsc_signals::params::ParamView;
@@ -297,26 +283,52 @@ mod fast {
         idx < ids.len() && ids[idx] == id
     }
 
+    /// 取末 5 笔的首/中/末笔（数量不足时 None）；`di` 为倒数偏移。
+    fn bs_triple(c: &CZSC, di: usize) -> Option<(&BI, &BI, &BI)> {
+        if c.bi_list.len() < di + 6 {
+            return None;
+        }
+        let bis = get_sub_elements(&c.bi_list, di, 5);
+        if bis.len() != 5 {
+            return None;
+        }
+        Some((&bis[0], &bis[2], &bis[4]))
+    }
+
+    /// 信号三段前缀：`(freq, D{di}#{ma_type}#{timeperiod}, k3)`。
+    fn bs_sig(
+        c: &CZSC,
+        di: usize,
+        ma_type: &str,
+        timeperiod: usize,
+        k3: &'static str,
+    ) -> (String, String, &'static str) {
+        (
+            c.freq.to_string(),
+            format!("D{}#{}#{}", di, ma_type, timeperiod),
+            k3,
+        )
+    }
+
     /// 快速实现：`cxt_second_bs_V230320`（均线辅助二买/二卖，末 5 笔）。
     pub fn second_bs_fast(c: &CZSC, params: &ParamView, ma: &mut MaSeriesCache) -> Vec<Signal> {
         let di = get_usize_param(params, "di", 1);
         let timeperiod = get_usize_param(params, "timeperiod", 21);
         let ma_type = params.str("ma_type", "SMA").to_uppercase();
-        let k1 = c.freq.to_string();
-        let k2 = format!("D{}#{}#{}", di, ma_type, timeperiod);
-        let k3 = "BS2辅助V230320";
-        let mut v1 = "其他";
-        if c.bi_list.len() < di + 6 {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        }
+        let v1 = second_bs_value(c, di, &ma_type, timeperiod, ma).unwrap_or("其他");
+        let (k1, k2, k3) = bs_sig(c, di, &ma_type, timeperiod, "BS2辅助V230320");
+        make_kline_signal_v1(&k1, &k2, k3, v1)
+    }
 
-        let bis = get_sub_elements(&c.bi_list, di, 5);
-        if bis.len() != 5 {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        }
-        let b1 = &bis[0];
-        let b3 = &bis[2];
-        let b5 = &bis[4];
+    /// 二买/二卖判定主体：返回命中分类或 None（对齐原实现的"其他"提前返回）。
+    fn second_bs_value(
+        c: &CZSC,
+        di: usize,
+        ma_type: &str,
+        timeperiod: usize,
+        ma: &mut MaSeriesCache,
+    ) -> Option<&'static str> {
+        let (b1, b3, b5) = bs_triple(c, di)?;
         let b1_fx_bars = fx_raw_bars(&b1.fx_b);
         let b3_fx_bars = fx_raw_bars(&b3.fx_b);
         let b5_fx_a_bars = fx_raw_bars(&b5.fx_a);
@@ -326,44 +338,32 @@ mod fast {
             || b5_fx_a_bars.len() < 2
             || b5_fx_b_bars.len() < 2
         {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
+            return None;
         }
-
-        let Some(b1_ma_b) = ma.ma_at(c, &ma_type, timeperiod, b1_fx_bars[b1_fx_bars.len() - 2].id)
-        else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
-        let Some(b3_ma_b) = ma.ma_at(c, &ma_type, timeperiod, b3_fx_bars[b3_fx_bars.len() - 2].id)
-        else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
-        let Some(b5_ma_a) = ma.ma_at(
+        let b1_ma_b = ma.ma_at(c, ma_type, timeperiod, b1_fx_bars[b1_fx_bars.len() - 2].id)?;
+        let b3_ma_b = ma.ma_at(c, ma_type, timeperiod, b3_fx_bars[b3_fx_bars.len() - 2].id)?;
+        let b5_ma_a = ma.ma_at(
             c,
-            &ma_type,
+            ma_type,
             timeperiod,
             b5_fx_a_bars[b5_fx_a_bars.len() - 2].id,
-        ) else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
-        let Some(b5_ma_b) = ma.ma_at(
+        )?;
+        let b5_ma_b = ma.ma_at(
             c,
-            &ma_type,
+            ma_type,
             timeperiod,
             b5_fx_b_bars[b5_fx_b_bars.len() - 2].id,
-        ) else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
+        )?;
 
         let lc1 = b1.get_low() < b1_ma_b && b3.get_low() < b3_ma_b;
         if b5.direction == Direction::Down && lc1 && b5_ma_a < b5_ma_b {
-            v1 = "二买";
+            return Some("二买");
         }
-
         let sc1 = b1.get_high() > b1_ma_b && b3.get_high() > b3_ma_b;
         if b5.direction == Direction::Up && sc1 && b5_ma_a > b5_ma_b {
-            v1 = "二卖";
+            return Some("二卖");
         }
-        make_kline_signal_v1(&k1, &k2, k3, v1)
+        None
     }
 
     /// 快速实现：`cxt_third_bs_V230318`（均线辅助三买/三卖，末 5 笔中枢）。
@@ -371,69 +371,60 @@ mod fast {
         let di = get_usize_param(params, "di", 1);
         let timeperiod = get_usize_param(params, "timeperiod", 34);
         let ma_type = params.str("ma_type", "SMA").to_uppercase();
-        let k1 = c.freq.to_string();
-        let k2 = format!("D{}#{}#{}", di, ma_type, timeperiod);
-        let k3 = "BS3辅助V230318";
-        let mut v1 = "其他";
+        let v1 = third_bs_value(c, di, &ma_type, timeperiod, ma).unwrap_or("其他");
+        let (k1, k2, k3) = bs_sig(c, di, &ma_type, timeperiod, "BS3辅助V230318");
+        make_kline_signal_v1(&k1, &k2, k3, v1)
+    }
 
-        if c.bi_list.len() < di + 6 {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        }
-        let bis = get_sub_elements(&c.bi_list, di, 5);
-        if bis.len() != 5 {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        }
-        let b1 = &bis[0];
-        let b3 = &bis[2];
-        let b5 = &bis[4];
+    /// 三买/三卖判定主体（同上）。
+    fn third_bs_value(
+        c: &CZSC,
+        di: usize,
+        ma_type: &str,
+        timeperiod: usize,
+        ma: &mut MaSeriesCache,
+    ) -> Option<&'static str> {
+        let (b1, b3, b5) = bs_triple(c, di)?;
         let zs_zd = b1.get_low().max(b3.get_low());
         let zs_zg = b1.get_high().min(b3.get_high());
         if zs_zd > zs_zg {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
+            return None;
         }
-
         let b1_fx = fx_raw_bars(&b1.fx_b);
         let b3_fx = fx_raw_bars(&b3.fx_b);
         let b5_fx = fx_raw_bars(&b5.fx_b);
         if b1_fx.is_empty() || b3_fx.is_empty() || b5_fx.is_empty() {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
+            return None;
         }
-
-        let Some(ma_1) = ma.snapshot_at(
+        let ma_1 = ma.snapshot_at(
             c,
-            &ma_type,
+            ma_type,
             timeperiod,
             b1_fx[b1_fx.len() - 1].id,
             b1_fx[b1_fx.len() - 1].close,
-        ) else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
-        let Some(ma_3) = ma.snapshot_at(
+        )?;
+        let ma_3 = ma.snapshot_at(
             c,
-            &ma_type,
+            ma_type,
             timeperiod,
             b3_fx[b3_fx.len() - 1].id,
             b3_fx[b3_fx.len() - 1].close,
-        ) else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
-        let Some(ma_5) = ma.snapshot_at(
+        )?;
+        let ma_5 = ma.snapshot_at(
             c,
-            &ma_type,
+            ma_type,
             timeperiod,
             b5_fx[b5_fx.len() - 1].id,
             b5_fx[b5_fx.len() - 1].close,
-        ) else {
-            return make_kline_signal_v1(&k1, &k2, k3, v1);
-        };
+        )?;
 
         if b5.direction == Direction::Down && b5.get_low() > zs_zg && ma_5 > ma_3 && ma_3 > ma_1 {
-            v1 = "三买";
+            return Some("三买");
         }
         if b5.direction == Direction::Up && b5.get_high() < zs_zd && ma_5 < ma_3 && ma_3 < ma_1 {
-            v1 = "三卖";
+            return Some("三卖");
         }
-        make_kline_signal_v1(&k1, &k2, k3, v1)
+        None
     }
 }
 
@@ -516,31 +507,10 @@ const SIGNAL_SPECS: [SignalSpec; 6] = [
     },
 ];
 
-/// 逐根 K 线演化 CZSC 并评估全部买卖点信号。
-///
-/// 返回 `(演化完成的 CZSC, 确认的买卖点)`：演化终态与
-/// `CZSC::new(bars)` 等价，调用方应复用它作为结构通道输入
-/// （见模块文档"P0 单遍化"）。`bars` 必须非空（由调用方保证）。
-///
-/// 信号函数共用同一个 TaCache，保证均线等中间结果一致。
-///
-/// 性能：所有信号函数只依赖已完成笔序列（bi_list），笔结构不变时
-/// 信号状态不会变化，因此只在笔结构发生变化（数量或最后一笔端点
-/// 变化）的 K 线上重新评估，避免对每根 K 线都跑 6 个信号函数。
-///
-/// 位置与去重约定：
-/// - 锚点取笔端分型的**极值K线**（`dt == fx.dt`），与分型/笔/中枢通道对齐；
-/// - 信号出现时先**挂起**，待锚定笔被后续新笔确认（不再是最末笔、未被重构）
-///   后才提交——避免锚定在演化中被破坏/合并的临时笔端点（图上落在笔中途）；
-/// - 信号为状态型分类，同一信号段（连续保持同一命中）只标记一次；
-/// - 同一锚点上多个信号同时命中时，只保留优先级最高的一个（func_id 最小，
-///   一买 > 一卖 > 二买 > 二卖 > 三买 > 三卖）。
-///
-/// 缠论买卖点关联状态：
-/// - 二买/二卖（403/404）必须依附最近的一买/一卖，且为一买/一卖后的**首个**
-///   回调/反弹确认点（每个 一买/一卖 结构内最多一个）；
-/// - 三买/三卖（405/406）另由 `strictize_third_bs_by_zs` 按中枢去重
-///   （每个中枢最多一个三买或三卖）。
+/// 缠论关联状态机：记录最近一买/一卖/二买/二卖锚点，严格化二买/二卖
+/// 依附（最近一买/一卖后的首个回调/反弹确认点，每个依附结构内最多一个；
+/// 三买/三卖另由 `strictize_third_bs_by_zs` 按中枢去重）。演化与评估
+/// 的其余语义（锚点/挂起/去重/性能）见模块文档。
 #[derive(Default)]
 struct BuySellState {
     last_buy1: Option<usize>,
@@ -620,26 +590,16 @@ impl SignalEvaluator {
         }
     }
 
-    /// CZSC 演化一步（`update_bar`）后调用：按笔结构指纹去重评估。
-    /// 笔结构不变时跳过全部信号函数（避免对每根 K 线都跑 6 个函数）。
-    pub(crate) fn observe(&mut self, czsc: &CZSC) {
-        let state = bi_state_fingerprint(czsc);
-        if self.last_bi_state == Some(state) {
-            return;
-        }
-        self.last_bi_state = Some(state);
-
-        let view = ParamView::new(&self.params);
-
-        // 1) 提交上一轮挂起的信号：锚定笔仍存在于 bi_list（已被新笔确认）才记录；
-        //    否则说明锚定笔在演化中被重构/合并，丢弃该点并复位命中状态，
-        //    让同一信号段可在后续稳定笔端点上重新挂起。
-        //    二买/二卖还需通过缠论关联校验（依附最近一买/一卖、且为首个确认点）。
+    /// 提交挂起信号：`check_anchor` 为 true 时要求锚定笔仍存在于 bi_list
+    /// （observe 用，否则复位命中状态以便后续重新挂起）；false 为最终
+    /// 提交（finalize_points 用，锚定在最终结构上天然稳定）。
+    fn commit_pending(&mut self, czsc: &CZSC, check_anchor: bool) {
         for p in self.pending.drain(..) {
-            let anchor_stable = czsc
-                .bi_list
-                .iter()
-                .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
+            let anchor_stable = !check_anchor
+                || czsc
+                    .bi_list
+                    .iter()
+                    .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
             if anchor_stable {
                 if self.bs_state.commit_allowed(p.func_id, p.anchor.index) {
                     self.bs_state.record(p.func_id, p.anchor.index);
@@ -655,8 +615,23 @@ impl SignalEvaluator {
                 self.prev_hit[p.spec_idx] = None;
             }
         }
+    }
+
+    /// CZSC 演化一步（`update_bar`）后调用：按笔结构指纹去重评估。
+    /// 笔结构不变时跳过全部信号函数（避免对每根 K 线都跑 6 个函数）。
+    pub(crate) fn observe(&mut self, czsc: &CZSC) {
+        let state = bi_state_fingerprint(czsc);
+        if self.last_bi_state == Some(state) {
+            return;
+        }
+        self.last_bi_state = Some(state);
+
+        // 1) 提交上一轮挂起的信号（锚定笔确认存活才记录；否则复位命中状态，
+        //    让同一信号段可在后续稳定笔端点上重新挂起）。
+        self.commit_pending(czsc, true);
 
         // 2) 评估当前信号：命中值相对上一次评估变化时挂起（同一信号段不重复挂起）
+        let view = ParamView::new(&self.params);
         for (i, spec) in SIGNAL_SPECS.iter().enumerate() {
             let signal = match spec.func {
                 SpecFunc::Original(func) => func(czsc, &view, &mut self.cache)
@@ -694,18 +669,7 @@ impl SignalEvaluator {
     pub(crate) fn finalize_points(&mut self, czsc: &CZSC) -> Vec<BuySellPoint> {
         // 末尾：提交仍挂起的信号（锚定在最终笔结构上，天然稳定），
         // 二买/二卖同样需通过缠论关联校验。
-        for p in self.pending.drain(..) {
-            if self.bs_state.commit_allowed(p.func_id, p.anchor.index) {
-                self.bs_state.record(p.func_id, p.anchor.index);
-                self.points.push(BuySellPoint {
-                    func_id: p.func_id,
-                    kind: p.kind,
-                    index: p.anchor.index,
-                    price: p.anchor.price,
-                    label: p.label,
-                });
-            }
-        }
+        self.commit_pending(czsc, false);
 
         // 只保留锚定在最终可见笔端点上的点：演化早期形成的笔可能因 max_bi_num
         // 上限被清理（图上无对应笔结构），其买卖点一并丢弃，避免成为"孤儿点"。

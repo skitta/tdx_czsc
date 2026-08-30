@@ -10,11 +10,6 @@ package tdx.czsc.v1;
 // 3. 支持“单次分析，多通道返回”的结果模型
 // 4. 兼容第一版只传 HIGH/LOW/CLOSE，同时为后续扩展预留字段
 
-option java_package = "org.tdx.czsc.proto";
-option java_multiple_files = true;
-option csharp_namespace = "Tdx.Czsc.Proto";
-option go_package = "tdx_czsc/proto;tdxczscproto";
-
 // =========================
 // Request / Response Envelope
 // =========================
@@ -61,9 +56,8 @@ enum StatusCode {
   STATUS_CODE_UNSPECIFIED = 0;
   STATUS_OK = 1;
   STATUS_INVALID_REQUEST = 2;
-  STATUS_UNSUPPORTED_VERSION = 3;
-  STATUS_TIMEOUT = 4;
-  STATUS_SERVICE_BUSY = 5;
+  // 编号 3~5 曾为 UNSUPPORTED_VERSION / TIMEOUT / SERVICE_BUSY，均无产生路径
+  //（版本不校验、超时与并发排队在 DLL/服务端各自处理），已移除且不再复用。
   STATUS_ANALYZE_FAILED = 6;
   STATUS_INTERNAL_ERROR = 7;
 }
@@ -296,19 +290,14 @@ message SignalPoint {
 
 message TimingStats {
   uint32 total_ms = 1;
-  uint32 build_bars_ms = 2;
   uint32 analyze_ms = 3;
-  uint32 map_channels_ms = 4;
 }
 
 // =========================
 // Health
 // =========================
 
-message HealthRequest {
-  // 预留字段，当前可为空
-  bool verbose = 1;
-}
+message HealthRequest {}
 
 message HealthResponse {
   ServiceState state = 1;

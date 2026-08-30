@@ -207,13 +207,9 @@ pub fn build_snapshot_profiled(
     )
 }
 
-/// 请求的通道号列表（空时使用默认结构通道集）。
+/// 请求的通道号列表（DLL 恒传全量；空列表语义为"不输出任何通道"）。
 fn requested_func_ids(request: &AnalyzeRequest) -> Vec<u32> {
-    if request.requested_func_ids.is_empty() {
-        vec![101, 102, 201, 301, 302]
-    } else {
-        request.requested_func_ids.clone()
-    }
+    request.requested_func_ids.clone()
 }
 
 /// 分析窗口起点（全量/限窗的统一表达）：

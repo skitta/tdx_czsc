@@ -30,9 +30,7 @@ pub(crate) fn patch_debug_channels(
 pub(crate) fn timing_stats(total_ms: u32, analyze_ms: u32) -> TimingStats {
     TimingStats {
         total_ms,
-        build_bars_ms: 0,
         analyze_ms,
-        map_channels_ms: 0,
     }
 }
 

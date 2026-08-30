@@ -3,6 +3,28 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.3.0] - 2026-08
+
+**性能优化（P0 单遍演化）**——纯 `rust_service` 侧改动，不动协议与 DLL。
+
+### 变更
+
+- `analyzer/signals.rs`：`compute_buy_sell_points` 返回演化完成的 `CZSC`
+  （终态与 `CZSC::new(bars)` 等价），`build_snapshot` 直接复用它作结构
+  通道输入（分型/笔/中枢/段）——同一窗口只跑一遍逐 bar 演化，消除
+  "信号演化 + 结构 `CZSC::new`" 的双重全量扫描；未请求 401~406 时仍走
+  `CZSC::new` 快速路径（语义不变，回归测试锁定）；
+- 明确不做"信号最终态一次性评估"：czsc-signals 信号函数只检查
+  `bi_list` 尾部窗口（最近 5/21/19/... 笔），最终态评估会丢失全部历史
+  买卖点（原因记录于 `signals.rs` 模块文档与 `docs/技术方案` §8.4）；
+- `examples/analyze_csv.rs` 剖面输出同步为单遍模型（`czsc+signals(单遍)`）；
+- 性能剖面单测 `profile_analysis_stages` 更新为新模型计时。
+
+### 文档
+
+- `docs/技术方案` §8.4 记录单遍演化与"不做最终态评估"的原因；
+  §11.1 更新单遍化后的耗时分布说明。
+
 ## [0.2.0] - 2026-08
 
 **公式层增强**（不涉及协议与 DLL 变更）。

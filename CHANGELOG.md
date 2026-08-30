@@ -3,6 +3,46 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.6.0] - 2026-08
+
+**P1：并行 + 异步优化**——纯 `rust_service` 侧改动，不动协议与 DLL。
+
+### 性能剖面工具化（P1-1）
+
+- `SnapshotProfile` + `build_snapshot_profiled` / `evolve_bars_profiled`
+  （可选收集，热路径零开销）；`analyze_csv` 输出各阶段耗时与
+  protobuf 编码耗时；
+- **剖面结论（3933 根全量）**：信号评估 observe 227.5ms（87%）、
+  czsc update_bar 22.9ms、pivots+segs 5ms、**channels 0.27ms / objects
+  0.08ms / 编码 0.19ms**——旧"通道/编码约 50%"认知证伪，通道并行
+  收益约 0.2ms 无意义，P1 转向信号评估热路径。
+
+### 信号评估热路径（P1-2，主要收益）
+
+- 新增 `analyzer/signals_fast.rs`：`cxt_second_bs_V230320` /
+  `cxt_third_bs_V230318` 的 O(log N) 重实现——O(1) 增量追加判定 +
+  尾部窗口整段重算（复刻 `update_ma_cache` 位级语义）、二分 id 定位
+  （替代每次评估 O(N) 的 `bar_index_map`）、快照重算（复刻
+  `ma_snapshot_value`）；信号字符串经官方构造器生成；
+- `SIGNAL_SPECS` 分派：一买/一卖保持原实现（纯数学），403~406 走
+  快速路径；`SignalEvaluator` 持有 `MaSeriesCache` 跨评估共享；
+- 对照测试 `tests/signals_fast_parity.rs`：4 个长度递增状态连续喂入
+  （覆盖 need_init/增量/修剪分支）+ 末笔原地修正（快照重算路径），
+  新旧实现信号字符串逐字符一致；
+- 实测：observe 227.5ms → **51.3ms**（4.4×）、evolve 250.7ms →
+  74.6ms、快照总 523ms → **170ms**（3.1×）；信号输出与优化前逐条一致。
+
+### 并发编排参数化（P1-4）
+
+- 全量分析并发上限 `MAX_CONCURRENT_ANALYSES=2` 硬编码 →
+  `AppConfig::analysis_parallelism`（默认 4），多窗口/多周期/多标的
+  场景可调大；增量承接与 singleflight 等待不占槽位。
+
+### 文档
+
+- `docs/技术方案` §10.1/§11.1/§11.2 更新 P1 实测与剖面结论；
+  README 性能表/吞吐设计同步；本条目。
+
 ## [0.5.0] - 2026-08
 
 **全量演进（P0c）**——`analysis_window=0` 即全量（默认），`max_bi_num` 默认

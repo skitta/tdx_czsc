@@ -7,6 +7,10 @@ pub struct AppConfig {
     pub request_timeout_ms: u64,
     pub max_bi_num: u32,
     pub min_bi_len: u32,
+    /// 默认分析窗口：**0 = 全量**（分析通达信传入的全部 K 线，前方历史
+    /// 全部参与结构与信号计算；配合增量缓存，序列增长/盘中原地更新走
+    /// 增量承接，稳态不重放窗口）。如需限窗可显式配置为正数
+    /// （取尾部 N 根——注意固定尾窗口的序列增长会回退全量分析）。
     pub default_analysis_window: u32,
     pub cache_capacity: usize,
     /// 增量分析：开启后服务端缓存已演化的 CZSC 与信号评估器，新请求与
@@ -32,9 +36,9 @@ impl Default for AppConfig {
             czsc_version: "czsc-core".to_string(),
             pipe_name: r"\\.\pipe\tdx_czsc_analyzer".to_string(),
             request_timeout_ms: 50,
-            max_bi_num: 50,
+            max_bi_num: 1000,
             min_bi_len: 6,
-            default_analysis_window: 1000,
+            default_analysis_window: 0,
             cache_capacity: 64,
             enable_incremental: true,
             incremental_cache_capacity: 8,

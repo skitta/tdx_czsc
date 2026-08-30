@@ -5,7 +5,7 @@
 //! 状态缓存 + singleflight）：
 //!
 //! 场景：
-//! - **序列增长（全量窗口 regime**，`data_len <= analysis_window`）：
+//! - **序列增长（全量窗口 regime**，`analysis_window == 0` 语义 = 全量窗口）：
 //!   首建全量 → 追加 N 根增量承接，输出与独立全量分析逐通道逐值一致，
 //!   且总分析次数不增加；
 //! - **等长末笔原地更新**（盘中刷新）：前缀不变、末笔同 dt 值变化，
@@ -94,7 +94,7 @@ async fn growing_series_incremental_equals_full_analysis() {
     let full_len = 1500usize;
 
     // 独立全量：直接分析前 1500 根
-    let full_state = config_for(MIN_BI_LEN, 100_000);
+    let full_state = config_for(MIN_BI_LEN, 0);
     let full_state = AppState::new(full_state);
     let full_req = analyze_request(
         "002340.SZ",
@@ -104,13 +104,13 @@ async fn growing_series_incremental_equals_full_analysis() {
         low[..full_len].to_vec(),
         close[..full_len].to_vec(),
         MIN_BI_LEN,
-        100_000,
+        0,
         false,
     );
     let full_snap = analyze_once(&full_state, full_req).await;
 
     // 增量：先分析前 500 根（首建全量），再分块追加到 1500 根（增量承接）
-    let inc_state = config_for(MIN_BI_LEN, 100_000);
+    let inc_state = config_for(MIN_BI_LEN, 0);
     let inc_state = AppState::new(inc_state);
     let mk_req = |len: usize| {
         analyze_request(
@@ -121,7 +121,7 @@ async fn growing_series_incremental_equals_full_analysis() {
             low[..len].to_vec(),
             close[..len].to_vec(),
             MIN_BI_LEN,
-            100_000,
+            0,
             false,
         )
     };
@@ -175,7 +175,7 @@ async fn in_place_last_bar_update_equals_full_analysis() {
     low_p[len - 1] = low[len - 1] + 0.05;
 
     // 独立全量：扰动后序列（前 len 根）
-    let full_state = config_for(MIN_BI_LEN, 100_000);
+    let full_state = config_for(MIN_BI_LEN, 0);
     let full_state = AppState::new(full_state);
     let full_req = analyze_request(
         "002340.SZ",
@@ -185,13 +185,13 @@ async fn in_place_last_bar_update_equals_full_analysis() {
         low_p[..len].to_vec(),
         close_p[..len].to_vec(),
         MIN_BI_LEN,
-        100_000,
+        0,
         false,
     );
     let full_snap = analyze_once(&full_state, full_req).await;
 
     // 增量：先分析原始序列（全量），再以同长度扰动序列请求 → 原地更新承接
-    let inc_state = config_for(MIN_BI_LEN, 100_000);
+    let inc_state = config_for(MIN_BI_LEN, 0);
     let inc_state = AppState::new(inc_state);
     let mk_req = |h: Vec<f32>, l: Vec<f32>, c: Vec<f32>| {
         analyze_request(
@@ -202,7 +202,7 @@ async fn in_place_last_bar_update_equals_full_analysis() {
             l,
             c,
             MIN_BI_LEN,
-            100_000,
+            0,
             false,
         )
     };
@@ -287,4 +287,78 @@ async fn tail_window_growth_falls_back_to_full_but_correct() {
         "尾窗口平移时增量不适用，必须回退全量（首建 1 次 + 回退 1 次）"
     );
     eprintln!("ok: 固定尾窗口序列增长回退全量，输出正确");
+}
+
+/// 全量演进：`analysis_window = 0`（新默认）分析全部 K 线，且
+/// `max_bi_num = 1000` 不再截断早期笔（旧默认 50 在 3933 根上触顶），
+/// 历史结构与买卖点完整保留。
+#[tokio::test]
+async fn full_history_window_zero_keeps_all_bis_and_signals() {
+    let (_, high, low, close) = load_series(CSV);
+    let state = AppState::new(config_for(MIN_BI_LEN, 0));
+    // 本地构造（common::analyze_request 的 max_bi_num 固定为 50）
+    let request = AnalyzeRequest {
+        func_group: "single_level_structure".to_string(),
+        requested_func_ids: REQ_FUNC_IDS.to_vec(),
+        symbol_hint: "002340.SZ".to_string(),
+        freq_hint: "D".to_string(),
+        data_len: close.len() as u32,
+        input_hash: 0,
+        bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
+        series: Some(tdx_czsc_service::proto::analysis::MarketSeries {
+            open: Vec::new(),
+            high,
+            low,
+            close,
+            vol: Vec::new(),
+            amount: Vec::new(),
+            dt_unix_ms: Vec::new(),
+        }),
+        options: Some(tdx_czsc_service::proto::analysis::CzscOptions {
+            max_bi_num: 1000,
+            min_bi_len: MIN_BI_LEN,
+            analysis_window: 0,
+            include_channels: true,
+            include_objects: true,
+            enable_incremental: false,
+        }),
+        prefer_cached: false,
+        caller_instance_id: 7,
+    };
+    let snap = analyze_once(&state, request).await;
+
+    let meta = snap.meta.as_ref().expect("meta");
+    assert_eq!(meta.data_len, 3933, "0 = 全量：覆盖全部 K 线");
+    assert_eq!(meta.analysis_window, 0);
+    assert_eq!(meta.max_bi_num, 1000);
+
+    // 通道覆盖全部 K 线（前方历史参与分析）
+    for ch in &snap.channels {
+        assert_eq!(
+            ch.values.len(),
+            3933,
+            "通道 {} 必须覆盖全部 K 线",
+            ch.func_id
+        );
+    }
+    // 早期笔不再被 50 上限截断（3933 根真实笔数应远超 50）
+    assert!(
+        snap.strokes.len() > 50,
+        "全量历史笔数应超过旧上限 50，实际 {}",
+        snap.strokes.len()
+    );
+    eprintln!(
+        "全量(3933根): strokes={} signals={}",
+        snap.strokes.len(),
+        snap.signals.len()
+    );
+    // 结构通道在历史早期也有输出（一买/一卖信号存在）
+    let buy1 = snapshot_channels(&snap)
+        .into_iter()
+        .find(|(id, _)| *id == 401)
+        .expect("401 通道");
+    assert!(
+        buy1.1.iter().any(|v| v.abs() > f32::EPSILON),
+        "全量历史应产出 401 一买信号"
+    );
 }

@@ -221,7 +221,7 @@ fn analyze_snapshot(
     )?;
     let freq = analyzer::parse_freq(&request.freq_hint)?;
     let data_len = request.data_len as usize;
-    let window_start = data_len.saturating_sub(params.analysis_window as usize);
+    let window_start = analyzer::window_start_of(data_len, params.analysis_window);
     let window_bars =
         analyzer::build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
     if window_bars.is_empty() {

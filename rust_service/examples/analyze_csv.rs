@@ -2,10 +2,11 @@
 //!
 //! 用法：
 //! ```text
-//! cargo run --example analyze_csv -- <csv路径> [min_bi_len]
+//! cargo run --example analyze_csv -- <csv路径> [min_bi_len] [analysis_window]
 //! cargo run --example analyze_csv -- tests/data/002340_30m.csv 3
-//! cargo run --example analyze_csv -- ../tests/data/999999_day.csv 5
+//! cargo run --example analyze_csv -- ../tests/data/999999_day.csv 5 0
 //! ```
+//! 窗口参数：0 = 全量（默认），正数 = 取尾部 N 根。
 //!
 //! 周期由文件名推断：包含 `30m`/`60m` 等视为分钟线，包含 `day`/`日线` 视为日线。
 
@@ -47,10 +48,9 @@ fn main() -> Result<()> {
 
     let path = &args[1];
     let min_bi_len: usize = args.get(2).map(|s| s.parse().unwrap_or(3)).unwrap_or(3);
-    let analysis_window: u32 = args
-        .get(3)
-        .map(|s| s.parse().unwrap_or(1000))
-        .unwrap_or(1000);
+    // 0 = 全量（默认）；正数 = 尾部 N 根窗口
+    let analysis_window: u32 = args.get(3).map(|s| s.parse().unwrap_or(0)).unwrap_or(0);
+    println!("分析窗口: {analysis_window} (0=全量)");
     // 按字节读取：通达信导出文件可能是 GBK 编码，数据行（日期/数字）为 ASCII，
     // 中文表头行会被跳过。
     let raw = fs::read(path).map_err(|e| anyhow!("读取 {path} 失败: {e}"))?;
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
         bar_build_mode: BarBuildMode::BarBuildFromHlc3 as i32,
         series: Some(series),
         options: Some(CzscOptions {
-            max_bi_num: 50,
+            max_bi_num: 1000,
             min_bi_len: min_bi_len as u32,
             analysis_window,
             include_channels: true,
@@ -98,8 +98,10 @@ fn main() -> Result<()> {
 
     let started = std::time::Instant::now();
     // 拆段计时: 定位分析耗时瓶颈
-    let window_start =
-        (close as usize).saturating_sub(request.options.as_ref().unwrap().analysis_window as usize);
+    let window_start = tdx_czsc_service::analyzer::window_start_of(
+        close as usize,
+        request.options.as_ref().unwrap().analysis_window,
+    );
     let t0 = std::time::Instant::now();
     let bars = tdx_czsc_service::analyzer::build_raw_bars(
         &request,
@@ -112,7 +114,7 @@ fn main() -> Result<()> {
     // 单遍演化（P0）：信号侧演化 CZSC 的同时产出完整结构（笔），
     // 复用其终态作诊断，不再单独 CZSC::new 第二遍。
     let (czsc, _points) =
-        tdx_czsc_service::analyzer::compute_buy_sell_points(&bars, 50, min_bi_len);
+        tdx_czsc_service::analyzer::compute_buy_sell_points(&bars, 1000, min_bi_len);
     let t2 = std::time::Instant::now();
     // 最后一笔详情: 检查 fx_a/fx_b 分型类型与位置
     {

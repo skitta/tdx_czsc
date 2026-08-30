@@ -120,7 +120,7 @@ pub fn build_snapshot(
         .unwrap_or(params.analysis_window);
 
     let freq = parse_freq(&request.freq_hint)?;
-    let window_start = data_len.saturating_sub(analysis_window as usize);
+    let window_start = window_start_of(data_len, analysis_window);
     let bars = build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
 
     if bars.is_empty() {
@@ -166,6 +166,23 @@ fn requested_func_ids(request: &AnalyzeRequest) -> Vec<u32> {
         vec![101, 102, 201, 301, 302]
     } else {
         request.requested_func_ids.clone()
+    }
+}
+
+/// 分析窗口起点（全量/限窗的统一表达）：
+/// `analysis_window == 0` 表示**全量**（从第 1 根 K 线起，前方历史
+/// 全部参与分析，配合增量缓存稳态维护）；否则取尾部 `analysis_window`
+/// 根（`data_len - analysis_window`，负则取 0）。
+///
+/// 全量演进说明：固定尾窗口下序列增长会使窗口整体平移，增量分析
+/// （`incremental.rs`）无法承接而回退全量；`0 = 全量` 时窗口首部稳定，
+/// 增量承接（序列增长/盘中原地更新）持续生效。
+pub fn window_start_of(data_len: usize, analysis_window: u32) -> usize {
+    let window = analysis_window as usize;
+    if window == 0 {
+        0
+    } else {
+        data_len.saturating_sub(window)
     }
 }
 
@@ -569,5 +586,43 @@ mod tests {
             czsc.bi_list.len(),
             points.len()
         );
+    }
+
+    /// 全量演进：`analysis_window == 0` 表示全量（窗口起点为 0），
+    /// 正数取尾部 N 根（不足 N 时起点为 0）。
+    #[test]
+    fn window_start_zero_means_full_series() {
+        assert_eq!(window_start_of(3933, 0), 0, "0 = 全量");
+        assert_eq!(window_start_of(3933, 1000), 2933, "尾部 1000 根");
+        assert_eq!(window_start_of(100, 1000), 0, "不足窗口时取全部");
+        assert_eq!(window_start_of(0, 0), 0);
+    }
+
+    /// 0 = 全量：快照通道覆盖全部传入 K 线，meta 记录 analysis_window=0。
+    #[test]
+    fn analysis_window_zero_snapshot_covers_all_bars() {
+        let mut request = sample_request(true);
+        request.requested_func_ids = vec![101, 201, 301];
+        request.options.as_mut().unwrap().analysis_window = 0;
+        // 新默认：AppConfig::default() 的 default_analysis_window = 0（全量）
+        let params = AnalysisParams::from((&request, &AppConfig::default()));
+        assert_eq!(params.analysis_window, 0);
+
+        let snapshot = build_snapshot(&request, &params).expect("snapshot");
+        let data_len = request.data_len as usize;
+        assert_eq!(snapshot.meta.as_ref().unwrap().data_len as usize, data_len);
+        assert_eq!(
+            snapshot.meta.as_ref().unwrap().analysis_window,
+            0,
+            "meta 应记录 0 = 全量"
+        );
+        for ch in &snapshot.channels {
+            assert_eq!(
+                ch.values.len(),
+                data_len,
+                "通道 {} 必须覆盖全部 K 线",
+                ch.func_id
+            );
+        }
     }
 }

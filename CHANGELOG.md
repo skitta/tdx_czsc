@@ -3,6 +3,44 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.4.0] - 2026-08
+
+**增量分析（enable_incremental）**——纯 `rust_service` 侧改动，不动协议与 DLL
+（协议 `CzscOptions.enable_incremental` 字段预留，服务端默认配置开启）。
+
+### 新增
+
+- `analyzer/incremental.rs`：`IncrementalState`（已演化的 CZSC + 信号评估器
+  `SignalEvaluator`）与 LRU `IncrementalCache`（默认 8 条）：
+  - **序列增长**（全量窗口 `data_len <= analysis_window`）：只对新增 K 线
+    `update_bar + observe`，稳态刷新 O(新增)。实测（002340）：新增 200~300
+    根约 7~12ms、同序列缓存命中约 10µs；
+  - **等长末笔原地更新**（盘中刷新）：前缀不变、末笔同 dt 值变化，走
+    czsc "同 dt 延伸"分支；
+  - 不适用自动回退全量（无状态/前缀不一致/窗口缩短/末笔 dt 变化/需要
+    信号但评估器缺失/固定尾窗口平移），输出与全量路径**位级一致**；
+- `analyzer/signals.rs`：演化与评估状态提取为可复用 `SignalEvaluator`
+  （observe/finalize_points），`evolve_bars` 成为全量/增量共用的演化核心；
+- `analyzer/mod.rs`：拆分 `assemble_snapshot`（全量/增量共用装配），
+  `build_snapshot` 内部改用单遍演化核心；
+- `handlers/analyze.rs`：增量优先编排（取出→锁外演化→放回，并发安全），
+  全量回退同时建立增量状态；
+- 配置：`enable_incremental`（默认 true）、`incremental_cache_capacity`
+  （默认 8）。
+
+### 测试
+
+- `tests/incremental_regression.rs`：真实行情（002340 日线 3933 根）经
+  `handle` 端到端验证：序列增长/末笔原地更新与独立全量**逐通道逐值一致**
+  且不触发第二次全量；固定尾窗口平移回退全量但输出正确；
+- `incremental.rs` 单元测试：逐块承接等价性、评估器跨结构-only 步骤保鲜、
+  原地更新/拒绝路径、前缀不匹配状态不变、LRU 语义。
+
+### 文档
+
+- `docs/技术方案` §9.4 新增增量状态缓存设计；§11.2 更新稳态刷新吞吐；
+  §14 已知限制与 §15 路线图同步（P0b 完成项）。
+
 ## [0.3.0] - 2026-08
 
 **性能优化（P0 单遍演化）**——纯 `rust_service` 侧改动，不动协议与 DLL。

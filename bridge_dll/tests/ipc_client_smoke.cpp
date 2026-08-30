@@ -15,11 +15,23 @@
 namespace {
 
 std::string GetEnvOrDefault(const char* name, const std::string& fallback) {
+#ifdef _WIN32
+    // MSVC 将 getenv 标记为弃用（C4996），改用 CRT 安全 API。
+    char* raw = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&raw, &len, name) == 0 && raw != nullptr) {
+        std::string value(raw);
+        std::free(raw);
+        return value.empty() ? fallback : value;
+    }
+    return fallback;
+#else
     const char* value = std::getenv(name);
     if (value == nullptr || *value == '\0') {
         return fallback;
     }
     return value;
+#endif
 }
 
 std::wstring Utf8ToWide(const std::string& input) {

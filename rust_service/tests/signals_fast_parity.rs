@@ -11,8 +11,6 @@
 use std::collections::HashMap;
 
 use czsc_core::analyze::CZSC;
-use czsc_core::objects::bar::{RawBar, RawBarBuilder};
-use czsc_core::objects::freq::Freq;
 use czsc_core::objects::signal::Signal;
 use czsc_signals::cxt::{cxt_second_bs_v230320, cxt_third_bs_v230318};
 use czsc_signals::params::ParamView;
@@ -21,39 +19,9 @@ use serde_json::Value;
 use tdx_czsc_service::analyzer::{MaSeriesCache, second_bs_fast, third_bs_fast};
 
 mod common;
-use common::load_series;
+use common::load_raw_bars;
 
 const CSV: &str = "../tests/data/002340_day.csv";
-
-fn load_bars(path: &str, len: usize) -> Vec<RawBar> {
-    let (_, high, low, close) = load_series(path);
-    let mut bars = Vec::with_capacity(len);
-    for i in 0..len.min(close.len()) {
-        let dt = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_local_timezone(chrono::Utc)
-            .unwrap()
-            + chrono::Duration::days(i as i64);
-        bars.push(
-            RawBarBuilder::default()
-                .symbol("002340.SZ")
-                .dt(dt)
-                .id(i as i32)
-                .freq(Freq::D)
-                .open(close[i] as f64)
-                .close(close[i] as f64)
-                .high(high[i] as f64)
-                .low(low[i] as f64)
-                .vol(0.0)
-                .amount(0.0)
-                .build()
-                .expect("bar"),
-        );
-    }
-    bars
-}
 
 fn signal_strings(signals: &[Signal]) -> Vec<String> {
     signals.iter().map(|s| s.to_string()).collect()
@@ -86,7 +54,7 @@ fn assert_parity(czsc: &CZSC, orig_ta: &mut TaCache, fast_ma: &mut MaSeriesCache
 
 #[test]
 fn second_and_third_bs_parity_across_growing_states() {
-    let all = load_bars(CSV, 3933);
+    let all = load_raw_bars(CSV, 0);
     // 长度递增的状态序列：同一 TaCache/MaSeriesCache 连续喂入，
     // 覆盖 update_ma_cache 的 need_init / 增量 / 修剪分支
     let mut orig_ta = TaCache::new();
@@ -102,7 +70,8 @@ fn second_and_third_bs_parity_across_growing_states() {
 /// （ma_snapshot_value 的 close 不一致分支）。
 #[test]
 fn parity_after_last_bar_price_update() {
-    let mut all = load_bars(CSV, 1500);
+    let mut all = load_raw_bars(CSV, 0);
+    all.truncate(1500);
     all[1499].close += 0.15;
     all[1499].high = all[1499].close + 0.1;
 

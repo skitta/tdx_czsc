@@ -8,7 +8,6 @@ build = "build.rs"
 
 [dependencies]
 anyhow = "1"
-bytes = "1"
 chrono = "0.4"
 czsc-core = "1"
 czsc-signals = "1.0.1"

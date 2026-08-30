@@ -4,7 +4,6 @@ pub struct AppConfig {
     pub service_version: String,
     pub czsc_version: String,
     pub pipe_name: String,
-    pub request_timeout_ms: u64,
     pub max_bi_num: u32,
     pub min_bi_len: u32,
     /// 默认分析窗口：**0 = 全量**（分析通达信传入的全部 K 线，前方历史
@@ -38,7 +37,6 @@ impl Default for AppConfig {
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             czsc_version: "czsc-core".to_string(),
             pipe_name: r"\\.\pipe\tdx_czsc_analyzer".to_string(),
-            request_timeout_ms: 50,
             max_bi_num: 1000,
             min_bi_len: 6,
             default_analysis_window: 0,

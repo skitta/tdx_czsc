@@ -9,52 +9,11 @@
 //! 使用仓库内真实数据 tests/data/002340_day.csv。
 
 use czsc_core::analyze::CZSC;
-use czsc_core::objects::bar::RawBarBuilder;
-use czsc_core::objects::freq::Freq;
 use std::collections::HashSet;
 use tdx_czsc_service::analyzer::compute_buy_sell_points;
 
 mod common;
-use common::{analyze_request, config_for, load_series};
-
-fn load_bars(path: &str, window_start: usize) -> Vec<czsc_core::objects::bar::RawBar> {
-    let csv = std::fs::read_to_string(path).expect("read csv");
-    let mut bars = Vec::new();
-    for (i, line) in csv.lines().skip(1).enumerate() {
-        if i < window_start {
-            continue;
-        }
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let dt = chrono::NaiveDate::parse_from_str(parts[0], "%Y-%m-%d")
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_local_timezone(chrono::Utc)
-            .unwrap();
-        let high: f32 = parts[2].parse().expect("high");
-        let low: f32 = parts[3].parse().expect("low");
-        let close: f32 = parts[4].parse().expect("close");
-        bars.push(
-            RawBarBuilder::default()
-                .symbol("002340.SZ")
-                .dt(dt)
-                .id(i as i32)
-                .freq(Freq::D)
-                .open(close)
-                .close(close)
-                .high(high)
-                .low(low)
-                .vol(0.0)
-                .amount(0.0)
-                .build()
-                .unwrap(),
-        );
-    }
-    bars
-}
+use common::{analyze_request, config_for, load_raw_bars, load_series};
 
 /// 最终可见笔的结束分型极值K线索引集合（与信号锚点同一套定位逻辑）。
 fn final_bi_end_extremes(bars: &[czsc_core::objects::bar::RawBar]) -> HashSet<usize> {
@@ -72,7 +31,7 @@ fn final_bi_end_extremes(bars: &[czsc_core::objects::bar::RawBar]) -> HashSet<us
 
 #[test]
 fn signal_anchors_are_final_bi_endpoints_and_unique() {
-    let bars = load_bars("../tests/data/002340_day.csv", 3933 - 1000);
+    let bars = load_raw_bars("../tests/data/002340_day.csv", 3933 - 1000);
     let (_czsc, points) = compute_buy_sell_points(&bars, 50, 6);
 
     assert!(!points.is_empty(), "002340 window should produce signals");
@@ -102,7 +61,7 @@ fn signal_anchors_are_final_bi_endpoints_and_unique() {
 /// 401/402（重置点）之间，最多一个 403 和一个 404。
 #[test]
 fn second_bs_attached_to_first_bs() {
-    let bars = load_bars("../tests/data/002340_day.csv", 3933 - 1000);
+    let bars = load_raw_bars("../tests/data/002340_day.csv", 3933 - 1000);
     let (_czsc, points) = compute_buy_sell_points(&bars, 50, 6);
 
     let mut sorted: Vec<&tdx_czsc_service::analyzer::BuySellPoint> = points.iter().collect();

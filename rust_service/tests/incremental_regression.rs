@@ -22,7 +22,7 @@ use tdx_czsc_service::proto::analysis::{AnalysisSnapshot, AnalyzeRequest};
 use tdx_czsc_service::state::AppState;
 
 mod common;
-use common::{analyze_request, config_for, load_series};
+use common::{analyze_request, analyze_request_ex, config_for, load_series};
 
 const CSV: &str = "../tests/data/002340_day.csv";
 const MIN_BI_LEN: u32 = 6;
@@ -296,35 +296,18 @@ async fn tail_window_growth_falls_back_to_full_but_correct() {
 async fn full_history_window_zero_keeps_all_bis_and_signals() {
     let (_, high, low, close) = load_series(CSV);
     let state = AppState::new(config_for(MIN_BI_LEN, 0));
-    // 本地构造（common::analyze_request 的 max_bi_num 固定为 50）
-    let request = AnalyzeRequest {
-        func_group: "single_level_structure".to_string(),
-        requested_func_ids: REQ_FUNC_IDS.to_vec(),
-        symbol_hint: "002340.SZ".to_string(),
-        freq_hint: "D".to_string(),
-        data_len: close.len() as u32,
-        input_hash: 0,
-        bar_build_mode: tdx_czsc_service::proto::analysis::BarBuildMode::BarBuildFromHlc3 as i32,
-        series: Some(tdx_czsc_service::proto::analysis::MarketSeries {
-            open: Vec::new(),
-            high,
-            low,
-            close,
-            vol: Vec::new(),
-            amount: Vec::new(),
-            dt_unix_ms: Vec::new(),
-        }),
-        options: Some(tdx_czsc_service::proto::analysis::CzscOptions {
-            max_bi_num: 1000,
-            min_bi_len: MIN_BI_LEN,
-            analysis_window: 0,
-            include_channels: true,
-            include_objects: true,
-            enable_incremental: false,
-        }),
-        prefer_cached: false,
-        caller_instance_id: 7,
-    };
+    let request = analyze_request_ex(
+        "002340.SZ",
+        REQ_FUNC_IDS.to_vec(),
+        "D",
+        high,
+        low,
+        close,
+        MIN_BI_LEN,
+        0,
+        true,
+        1000,
+    );
     let snap = analyze_once(&state, request).await;
 
     let meta = snap.meta.as_ref().expect("meta");

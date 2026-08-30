@@ -42,14 +42,13 @@
 use czsc_core::analyze::CZSC;
 use czsc_core::objects::bar::RawBar;
 use czsc_core::objects::signal::Signal;
-use czsc_signals::cxt::{
-    cxt_first_buy_v221126, cxt_first_sell_v221126, cxt_second_bs_v230320, cxt_third_bs_v230318,
-};
+use czsc_signals::cxt::{cxt_first_buy_v221126, cxt_first_sell_v221126};
 use czsc_signals::params::ParamView;
 use czsc_signals::types::TaCache;
 use serde_json::Value;
 use std::collections::HashMap;
 
+use super::signals_fast::{MaSeriesCache, second_bs_fast, third_bs_fast};
 use crate::proto::analysis::SignalKind;
 
 /// 一条已确认的买卖点。
@@ -77,13 +76,19 @@ struct PendingPoint {
     label: String,
 }
 
-type SignalFn = fn(&CZSC, &ParamView, &mut TaCache) -> Vec<Signal>;
+/// 信号函数分派：原实现（first_buy/sell，纯数学，无缓存依赖）与
+/// P1 快速重实现（second/third 均线辅助，见 `signals_fast.rs`，输出与
+/// czsc-signals 原实现位级一致，对照测试锁定）。
+enum SpecFunc {
+    Original(fn(&CZSC, &ParamView, &mut TaCache) -> Vec<Signal>),
+    Fast(fn(&CZSC, &ParamView, &mut MaSeriesCache) -> Vec<Signal>),
+}
 
 struct SignalSpec {
     func_id: u32,
     kind: SignalKind,
     hit_value: &'static str,
-    func: SignalFn,
+    func: SpecFunc,
 }
 
 const SIGNAL_SPECS: [SignalSpec; 6] = [
@@ -91,37 +96,37 @@ const SIGNAL_SPECS: [SignalSpec; 6] = [
         func_id: 401,
         kind: SignalKind::SignalBuy1,
         hit_value: "一买",
-        func: cxt_first_buy_v221126,
+        func: SpecFunc::Original(cxt_first_buy_v221126),
     },
     SignalSpec {
         func_id: 402,
         kind: SignalKind::SignalSell1,
         hit_value: "一卖",
-        func: cxt_first_sell_v221126,
+        func: SpecFunc::Original(cxt_first_sell_v221126),
     },
     SignalSpec {
         func_id: 403,
         kind: SignalKind::SignalBuy2,
         hit_value: "二买",
-        func: cxt_second_bs_v230320,
+        func: SpecFunc::Fast(second_bs_fast),
     },
     SignalSpec {
         func_id: 404,
         kind: SignalKind::SignalSell2,
         hit_value: "二卖",
-        func: cxt_second_bs_v230320,
+        func: SpecFunc::Fast(second_bs_fast),
     },
     SignalSpec {
         func_id: 405,
         kind: SignalKind::SignalBuy3,
         hit_value: "三买",
-        func: cxt_third_bs_v230318,
+        func: SpecFunc::Fast(third_bs_fast),
     },
     SignalSpec {
         func_id: 406,
         kind: SignalKind::SignalSell3,
         hit_value: "三卖",
-        func: cxt_third_bs_v230318,
+        func: SpecFunc::Fast(third_bs_fast),
     },
 ];
 
@@ -204,6 +209,8 @@ impl BuySellState {
 /// 在状态中供后续演化继续，避免全窗口重放。
 pub(crate) struct SignalEvaluator {
     cache: TaCache,
+    /// P1 快速均线缓存（second/third 信号重实现使用）
+    ma_fast: MaSeriesCache,
     params: HashMap<String, Value>,
     points: Vec<BuySellPoint>,
     pending: Vec<PendingPoint>,
@@ -217,6 +224,7 @@ impl SignalEvaluator {
     pub(crate) fn new() -> Self {
         Self {
             cache: TaCache::new(),
+            ma_fast: MaSeriesCache::new(),
             params: HashMap::<String, Value>::new(),
             points: Vec::new(),
             pending: Vec::new(),
@@ -264,9 +272,14 @@ impl SignalEvaluator {
 
         // 2) 评估当前信号：命中值相对上一次评估变化时挂起（同一信号段不重复挂起）
         for (i, spec) in SIGNAL_SPECS.iter().enumerate() {
-            let signal = (spec.func)(czsc, &view, &mut self.cache)
-                .into_iter()
-                .find(|s| signal_hits(s, spec.hit_value));
+            let signal = match spec.func {
+                SpecFunc::Original(func) => func(czsc, &view, &mut self.cache)
+                    .into_iter()
+                    .find(|s| signal_hits(s, spec.hit_value)),
+                SpecFunc::Fast(func) => func(czsc, &view, &mut self.ma_fast)
+                    .into_iter()
+                    .find(|s| signal_hits(s, spec.hit_value)),
+            };
             let current_hit = signal.as_ref().map(|_| spec.hit_value);
             if current_hit == self.prev_hit[i] {
                 continue;

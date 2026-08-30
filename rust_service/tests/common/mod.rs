@@ -29,6 +29,8 @@ pub fn load_series(path: &str) -> (Vec<String>, Vec<f32>, Vec<f32>, Vec<f32>) {
 }
 
 /// 构造分析请求（无真实时间戳；窗口/笔参数显式指定）。
+/// `#[allow(dead_code)]`：各测试二进制独立编译，个别二进制只用 `load_series`。
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn analyze_request(
     symbol: &str,
@@ -73,6 +75,7 @@ pub fn analyze_request(
 }
 
 /// 按笔长/分析窗口构造测试配置（贴近各数据文件的实际参数）。
+#[allow(dead_code)]
 pub fn config_for(min_bi_len: u32, analysis_window: u32) -> AppConfig {
     AppConfig {
         min_bi_len,

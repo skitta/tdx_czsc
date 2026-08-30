@@ -19,6 +19,7 @@ mod pivots;
 mod rawbars;
 mod segs;
 mod signals;
+mod signals_fast;
 
 #[cfg(test)]
 mod fixtures;
@@ -34,6 +35,7 @@ pub use segs::{Segment, build_segs};
 pub(crate) use signals::evolve_bars;
 pub(crate) use signals::evolve_bars_profiled;
 pub use signals::{BuySellPoint, compute_buy_sell_points};
+pub use signals_fast::{MaSeriesCache, second_bs_fast, third_bs_fast};
 
 use czsc_core::analyze::CZSC;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -3,6 +3,48 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [0.5.0] - 2026-08
+
+**全量演进（P0c）**——`analysis_window=0` 即全量（默认），`max_bi_num` 默认
+1000；协议语义不变（0 = 全量），服务端与 DLL 默认值同步。修复：通达信
+缩放到历史区域时前方 K 线无笔/段/中枢（此前尾部 1000 根窗口+笔数上限 50
+双重截断）。
+
+### 变更
+
+- `analysis_window == 0`（默认）表示**全量**：分析通达信传入的全部 K 线，
+  新增 `analyzer::window_start_of`（全量/限窗统一表达），`build_snapshot`
+  与增量路径共用；
+- `max_bi_num` 默认 50 → **1000**（对齐 czsc Python 默认）：全量历史
+  笔数不再被截断（002340 全量 332 笔 vs 旧上限 50；买卖点自历史早期
+  index=59 起完整保留）；`max_bi_num` 仍为 czsc 硬上限，超短线周期可
+  调大 `TDX_CZSC_MAX_BI_NUM`；
+- 全量窗口首部稳定 → P0b 增量承接（序列增长/盘中原地更新）在默认配置
+  下直接生效，滚动/缩放零重算；
+- DLL 默认值同步：`bridge_config.h` / `bridge_service_protocol.h` /
+  `tdx_czsc_bridge.ini.example`（`analysis_window=0`、`max_bi_num=1000`）。
+
+### 测试
+
+- `window_start_zero_means_full_series` / `analysis_window_zero_snapshot_covers_all_bars`
+  （单测：0 = 全量语义）；
+- `full_history_window_zero_keeps_all_bis_and_signals`（集成：3933 根全量
+  通道全覆盖、笔数 >50、401 信号存在）；
+- `incremental_regression` 全量窗口用例改用 `analysis_window=0`。
+
+### 实测
+
+| 场景 | 耗时 |
+|---|---|
+| 3933 根日线全量（min_bi_len=6，332 笔） | 单遍 253ms / 总 523ms |
+| 3933 根日线全量（min_bi_len=3，>1000 笔） | 单遍 401ms / 总 813ms |
+| 增量承接（新增数百根） | 约 7~12ms |
+
+### 文档
+
+- `docs/技术方案` §6.2/§10/§11 更新默认值与实测口径；README 特性/参数/
+  性能表/规划同步。
+
 ## [0.4.0] - 2026-08
 
 **增量分析（enable_incremental）**——纯 `rust_service` 侧改动，不动协议与 DLL

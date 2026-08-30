@@ -53,7 +53,7 @@ use std::collections::HashMap;
 use crate::proto::analysis::SignalKind;
 
 /// 一条已确认的买卖点。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BuySellPoint {
     /// 对应 401~406 通道号
     pub func_id: u32,
@@ -195,6 +195,171 @@ impl BuySellState {
     }
 }
 
+/// 信号评估器：持有与 CZSC 演化过程同步的评估状态（挂起/提交、命中去重、
+/// 缠论关联、TaCache）。
+///
+/// 增量路径复用：新 K 线到来时先 `czsc.update_bar` 再 `observe(&czsc)`，
+/// 演化序列与全量 `compute_buy_sell_points` 逐 bar 完全一致（见
+/// `evolve_bars`）；`finalize_points` 产出当前确认的买卖点，评估器保留
+/// 在状态中供后续演化继续，避免全窗口重放。
+pub(crate) struct SignalEvaluator {
+    cache: TaCache,
+    params: HashMap<String, Value>,
+    points: Vec<BuySellPoint>,
+    pending: Vec<PendingPoint>,
+    // 每个通道上一次评估时的命中值：命中值变化（从无到有或换类型）才挂起新信号
+    prev_hit: [Option<&'static str>; SIGNAL_SPECS.len()],
+    last_bi_state: Option<(usize, i32)>,
+    bs_state: BuySellState,
+}
+
+impl SignalEvaluator {
+    pub(crate) fn new() -> Self {
+        Self {
+            cache: TaCache::new(),
+            params: HashMap::<String, Value>::new(),
+            points: Vec::new(),
+            pending: Vec::new(),
+            prev_hit: [None; SIGNAL_SPECS.len()],
+            last_bi_state: None,
+            bs_state: BuySellState::default(),
+        }
+    }
+
+    /// CZSC 演化一步（`update_bar`）后调用：按笔结构指纹去重评估。
+    /// 笔结构不变时跳过全部信号函数（避免对每根 K 线都跑 6 个函数）。
+    pub(crate) fn observe(&mut self, czsc: &CZSC) {
+        let state = bi_state_fingerprint(czsc);
+        if self.last_bi_state == Some(state) {
+            return;
+        }
+        self.last_bi_state = Some(state);
+
+        let view = ParamView::new(&self.params);
+
+        // 1) 提交上一轮挂起的信号：锚定笔仍存在于 bi_list（已被新笔确认）才记录；
+        //    否则说明锚定笔在演化中被重构/合并，丢弃该点并复位命中状态，
+        //    让同一信号段可在后续稳定笔端点上重新挂起。
+        //    二买/二卖还需通过缠论关联校验（依附最近一买/一卖、且为首个确认点）。
+        for p in self.pending.drain(..) {
+            let anchor_stable = czsc
+                .bi_list
+                .iter()
+                .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
+            if anchor_stable {
+                if self.bs_state.commit_allowed(p.func_id, p.anchor.index) {
+                    self.bs_state.record(p.func_id, p.anchor.index);
+                    self.points.push(BuySellPoint {
+                        func_id: p.func_id,
+                        kind: p.kind,
+                        index: p.anchor.index,
+                        price: p.anchor.price,
+                        label: p.label,
+                    });
+                }
+            } else {
+                self.prev_hit[p.spec_idx] = None;
+            }
+        }
+
+        // 2) 评估当前信号：命中值相对上一次评估变化时挂起（同一信号段不重复挂起）
+        for (i, spec) in SIGNAL_SPECS.iter().enumerate() {
+            let signal = (spec.func)(czsc, &view, &mut self.cache)
+                .into_iter()
+                .find(|s| signal_hits(s, spec.hit_value));
+            let current_hit = signal.as_ref().map(|_| spec.hit_value);
+            if current_hit == self.prev_hit[i] {
+                continue;
+            }
+            self.prev_hit[i] = current_hit;
+            let Some(signal) = signal else {
+                continue;
+            };
+            let Some(anchor) = latest_bi_end_anchor(czsc) else {
+                continue;
+            };
+            self.pending.push(PendingPoint {
+                spec_idx: i,
+                func_id: spec.func_id,
+                kind: spec.kind,
+                anchor,
+                label: signal.to_string(),
+            });
+        }
+    }
+
+    /// 产出当前确认的买卖点（幂等）：末尾提交挂起信号、孤儿点过滤、同锚点去重。
+    ///
+    /// 与全量路径的收尾一致；评估器内部状态保持可继续演化（后续 observe 从
+    /// 已提交状态继续）。
+    pub(crate) fn finalize_points(&mut self, czsc: &CZSC) -> Vec<BuySellPoint> {
+        // 末尾：提交仍挂起的信号（锚定在最终笔结构上，天然稳定），
+        // 二买/二卖同样需通过缠论关联校验。
+        for p in self.pending.drain(..) {
+            if self.bs_state.commit_allowed(p.func_id, p.anchor.index) {
+                self.bs_state.record(p.func_id, p.anchor.index);
+                self.points.push(BuySellPoint {
+                    func_id: p.func_id,
+                    kind: p.kind,
+                    index: p.anchor.index,
+                    price: p.anchor.price,
+                    label: p.label,
+                });
+            }
+        }
+
+        // 只保留锚定在最终可见笔端点上的点：演化早期形成的笔可能因 max_bi_num
+        // 上限被清理（图上无对应笔结构），其买卖点一并丢弃，避免成为"孤儿点"。
+        // （评估器内保留原始点集，后续 observe 继续演化，一致性由最终过滤保证。）
+        let mut points = self.points.clone();
+        let final_bis = czsc.get_finished_bis();
+        points.retain(|p| {
+            final_bis
+                .iter()
+                .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.index))
+        });
+
+        // 同一锚点上多个信号同时命中时，只保留优先级最高的一个（func_id 最小）。
+        let mut best_by_anchor: Vec<BuySellPoint> = Vec::new();
+        for point in points {
+            if let Some(existing) = best_by_anchor.iter_mut().find(|p| p.index == point.index) {
+                if point.func_id < existing.func_id {
+                    *existing = point;
+                }
+            } else {
+                best_by_anchor.push(point);
+            }
+        }
+        best_by_anchor.sort_by_key(|p| p.index);
+        best_by_anchor
+    }
+}
+
+/// 全量演化核心：逐根演化 CZSC，并在需要时同步信号评估器。
+///
+/// 增量路径与全量路径共用同一演化序列：增量只对新增 K 线继续
+/// `update_bar + observe`（见 `incremental.rs`），演化终态与全量一致。
+/// `bars` 必须非空（由调用方保证）。
+pub(crate) fn evolve_bars(
+    bars: &[RawBar],
+    max_bi_num: usize,
+    min_bi_len: usize,
+    wants_signals: bool,
+) -> (CZSC, Option<SignalEvaluator>) {
+    let mut czsc = CZSC::new(vec![bars[0].clone()], max_bi_num, min_bi_len);
+    let mut evaluator = wants_signals.then(SignalEvaluator::new);
+    if let Some(ev) = evaluator.as_mut() {
+        ev.observe(&czsc);
+    }
+    for bar in &bars[1..] {
+        czsc.update_bar(bar.clone());
+        if let Some(ev) = evaluator.as_mut() {
+            ev.observe(&czsc);
+        }
+    }
+    (czsc, evaluator)
+}
+
 pub fn compute_buy_sell_points(
     bars: &[RawBar],
     max_bi_num: usize,
@@ -204,119 +369,12 @@ pub fn compute_buy_sell_points(
         !bars.is_empty(),
         "compute_buy_sell_points requires non-empty bars"
     );
-
-    let mut czsc = CZSC::new(vec![bars[0].clone()], max_bi_num, min_bi_len);
-    let mut cache = TaCache::new();
-    let params = HashMap::<String, Value>::new();
-    let view = ParamView::new(&params);
-    let mut points = Vec::new();
-    let mut pending: Vec<PendingPoint> = Vec::new();
-    // 每个通道上一次评估时的命中值：命中值变化（从无到有或换类型）才挂起新信号
-    let mut prev_hit: [Option<&'static str>; SIGNAL_SPECS.len()] = [None; SIGNAL_SPECS.len()];
-    let mut last_bi_state: Option<(usize, i32)> = None;
-    let mut bs_state = BuySellState::default();
-
-    let mut evaluate = |czsc: &CZSC| {
-        let state = bi_state_fingerprint(czsc);
-        if last_bi_state == Some(state) {
-            return;
-        }
-        last_bi_state = Some(state);
-
-        // 1) 提交上一轮挂起的信号：锚定笔仍存在于 bi_list（已被新笔确认）才记录；
-        //    否则说明锚定笔在演化中被重构/合并，丢弃该点并复位命中状态，
-        //    让同一信号段可在后续稳定笔端点上重新挂起。
-        //    二买/二卖还需通过缠论关联校验（依附最近一买/一卖、且为首个确认点）。
-        for p in pending.drain(..) {
-            let anchor_stable = czsc
-                .bi_list
-                .iter()
-                .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
-            if anchor_stable {
-                if bs_state.commit_allowed(p.func_id, p.anchor.index) {
-                    bs_state.record(p.func_id, p.anchor.index);
-                    points.push(BuySellPoint {
-                        func_id: p.func_id,
-                        kind: p.kind,
-                        index: p.anchor.index,
-                        price: p.anchor.price,
-                        label: p.label,
-                    });
-                }
-            } else {
-                prev_hit[p.spec_idx] = None;
-            }
-        }
-
-        // 2) 评估当前信号：命中值相对上一次评估变化时挂起（同一信号段不重复挂起）
-        for (i, spec) in SIGNAL_SPECS.iter().enumerate() {
-            let signal = (spec.func)(czsc, &view, &mut cache)
-                .into_iter()
-                .find(|s| signal_hits(s, spec.hit_value));
-            let current_hit = signal.as_ref().map(|_| spec.hit_value);
-            if current_hit == prev_hit[i] {
-                continue;
-            }
-            prev_hit[i] = current_hit;
-            let Some(signal) = signal else {
-                continue;
-            };
-            let Some(anchor) = latest_bi_end_anchor(czsc) else {
-                continue;
-            };
-            pending.push(PendingPoint {
-                spec_idx: i,
-                func_id: spec.func_id,
-                kind: spec.kind,
-                anchor,
-                label: signal.to_string(),
-            });
-        }
-    };
-
-    evaluate(&czsc);
-    for bar in &bars[1..] {
-        czsc.update_bar(bar.clone());
-        evaluate(&czsc);
-    }
-
-    // 末尾：提交仍挂起的信号（锚定在最终笔结构上，天然稳定），
-    // 二买/二卖同样需通过缠论关联校验。
-    for p in pending {
-        if bs_state.commit_allowed(p.func_id, p.anchor.index) {
-            bs_state.record(p.func_id, p.anchor.index);
-            points.push(BuySellPoint {
-                func_id: p.func_id,
-                kind: p.kind,
-                index: p.anchor.index,
-                price: p.anchor.price,
-                label: p.label,
-            });
-        }
-    }
-
-    // 只保留锚定在最终可见笔端点上的点：演化早期形成的笔可能因 max_bi_num
-    // 上限被清理（图上无对应笔结构），其买卖点一并丢弃，避免成为"孤儿点"。
-    let final_bis = czsc.get_finished_bis();
-    points.retain(|p| {
-        final_bis
-            .iter()
-            .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.index))
-    });
-
-    // 同一锚点上多个信号同时命中时，只保留优先级最高的一个（func_id 最小）。
-    let mut best_by_anchor: Vec<BuySellPoint> = Vec::new();
-    for point in points {
-        if let Some(existing) = best_by_anchor.iter_mut().find(|p| p.index == point.index) {
-            if point.func_id < existing.func_id {
-                *existing = point;
-            }
-        } else {
-            best_by_anchor.push(point);
-        }
-    }
-    best_by_anchor.sort_by_key(|p| p.index);
-    (czsc, best_by_anchor)
+    let (czsc, mut evaluator) = evolve_bars(bars, max_bi_num, min_bi_len, true);
+    let points = evaluator
+        .as_mut()
+        .expect("wants_signals=true must create evaluator")
+        .finalize_points(&czsc);
+    (czsc, points)
 }
 
 /// 笔结构指纹：(笔数量, 最后一笔端点分型中间 K 线 id)。

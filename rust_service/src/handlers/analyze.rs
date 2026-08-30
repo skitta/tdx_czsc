@@ -6,8 +6,9 @@ use anyhow::{Result, anyhow};
 
 use super::debug::{patch_debug_channels, timing_stats};
 use crate::analyzer;
+use crate::analyzer::{AcceptOutcome, IncrementalKey, IncrementalState};
 use crate::cache::CacheKey;
-use crate::proto::analysis::{AnalyzeRequest, AnalyzeResponse};
+use crate::proto::analysis::{AnalysisSnapshot, AnalyzeRequest, AnalyzeResponse};
 use crate::state::AppState;
 
 /// 等待同数据段（CacheKey）的在途分析完成并重查缓存。
@@ -140,20 +141,22 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
     }
 
     // 5) 分析（CPU 密集）在阻塞线程池执行，不占用 runtime worker；
-    //    AnalysisRequest 为 Clone，AppState 经 Arc 传入；分析参数由
-    //    请求 + 配置解析（analyzer::AnalysisParams），与运行时状态解耦。
+    //    开启增量时优先增量承接（前缀一致只演化新增 K 线，稳态 O(新增)），
+    //    未命中回退全量；分析参数由请求 + 配置解析。
     let analyze_request = request.clone();
     let analyze_state = state.clone();
     let analyze = tokio::task::spawn_blocking(move || -> Result<_> {
         let params = analyzer::AnalysisParams::from((&analyze_request, &analyze_state.config));
-        Ok(analyzer::build_snapshot(&analyze_request, &params)?)
+        analyze_snapshot(&analyze_request, &params, &analyze_state)
     })
     .await
     .map_err(|err| anyhow!("analysis task join failed: {err}"))?;
 
     let mut snapshot = match analyze {
-        Ok(snapshot) => {
-            state.total_analyses.fetch_add(1, Ordering::Relaxed);
+        Ok((snapshot, is_full)) => {
+            if is_full {
+                state.total_analyses.fetch_add(1, Ordering::Relaxed);
+            }
             snapshot
         }
         Err(err) => {
@@ -181,6 +184,104 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
         service_cache_hit: false,
         timing: Some(timing_stats(elapsed_ms, elapsed_ms)),
     })
+}
+
+/// 增量或全量分析入口（在 spawn_blocking 中执行）。返回 (快照, 是否全量)。
+///
+/// 增量路径（`config.enable_incremental`（默认开）或请求显式开启）：
+/// 先构建窗口 K 线（O(窗口)，数百微秒量级），从 `IncrementalCache`
+/// 取出匹配状态并 `accept`：命中且前缀一致则只演化新增 K 线（或等长
+/// 末笔原地更新），随后装配快照并把演化后的状态放回缓存；
+/// 无法承接（无状态/前缀不一致/评估器缺失）时执行全量演化，同时
+/// 建立增量状态供后续请求承接。输出与全量路径完全一致。
+///
+/// 非增量路径保持 `build_snapshot` 原样调用。
+fn analyze_snapshot(
+    request: &AnalyzeRequest,
+    params: &analyzer::AnalysisParams,
+    state: &AppState,
+) -> Result<(AnalysisSnapshot, bool)> {
+    let incremental_active = state.config.enable_incremental
+        || request
+            .options
+            .as_ref()
+            .is_some_and(|o| o.enable_incremental);
+    if !incremental_active {
+        let snapshot = analyzer::build_snapshot(request, params)?;
+        return Ok((snapshot, true));
+    }
+
+    // —— 增量路径（默认开启）——
+    analyzer::validate_series_lengths(
+        request.data_len,
+        request
+            .series
+            .as_ref()
+            .ok_or_else(|| anyhow!("market series is missing"))?,
+    )?;
+    let freq = analyzer::parse_freq(&request.freq_hint)?;
+    let data_len = request.data_len as usize;
+    let window_start = data_len.saturating_sub(params.analysis_window as usize);
+    let window_bars =
+        analyzer::build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
+    if window_bars.is_empty() {
+        return Err(anyhow!("bars are empty after applying analysis window"));
+    }
+
+    let wants_signals = request
+        .requested_func_ids
+        .iter()
+        .any(|id| (401..=406).contains(id));
+    let max_bi_num = params.max_bi_num as usize;
+    let min_bi_len = params.min_bi_len as usize;
+
+    let key = IncrementalKey {
+        freq_hint: request.freq_hint.clone(),
+        max_bi_num: params.max_bi_num,
+        min_bi_len: params.min_bi_len,
+        analysis_window: params.analysis_window,
+    };
+
+    // 1) 尝试增量承接：取出 →（锁外演化）→ 放回。
+    //    并发取出同一条目时后取者得到 None 走全量，放入总是完整状态。
+    //    注意：take 的 MutexGuard 是临时值，必须独立成语句，否则其生命周期
+    //    会延伸到整个 if-let（内部再 lock() 导致 std Mutex 自死锁）。
+    let taken = state.incremental.lock().unwrap().take(&key);
+    if let Some(mut st) = taken {
+        if st.accept(&window_bars, wants_signals) == AcceptOutcome::Served {
+            let points = st.signals();
+            let snapshot = analyzer::assemble_snapshot(
+                request, params, freq, max_bi_num, min_bi_len, &st.czsc, points,
+            )?;
+            state.incremental.lock().unwrap().put(key.clone(), st);
+            return Ok((snapshot, false));
+        }
+        // 不适用：放回缓存（后续可承接的请求仍可复用）
+        state.incremental.lock().unwrap().put(key.clone(), st);
+    }
+
+    // 2) 全量演化（首建或无法承接），同时建立增量状态供后续承接。
+    let (czsc, mut evaluator) =
+        analyzer::evolve_bars(&window_bars, max_bi_num, min_bi_len, wants_signals);
+    let buy_sell_points = match evaluator.as_mut() {
+        Some(ev) => ev.finalize_points(&czsc),
+        None => Vec::new(),
+    };
+    let snapshot = analyzer::assemble_snapshot(
+        request,
+        params,
+        freq,
+        max_bi_num,
+        min_bi_len,
+        &czsc,
+        buy_sell_points,
+    )?;
+    state
+        .incremental
+        .lock()
+        .unwrap()
+        .put(key, IncrementalState::new(window_bars, czsc, evaluator));
+    Ok((snapshot, true))
 }
 
 struct ActiveRequestGuard {

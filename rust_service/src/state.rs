@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use tokio::sync::{Notify, RwLock, Semaphore};
 
+use crate::analyzer::IncrementalCache;
 use crate::cache::{CacheKey, SnapshotCache};
 use crate::config::AppConfig;
 
@@ -22,6 +23,9 @@ pub struct AppState {
     pub started_at: Instant,
     pub active_requests: AtomicU32,
     pub cache: RwLock<SnapshotCache>,
+    /// 增量分析状态缓存（CZSC + 信号评估器）：由分析线程取出→演化→放回
+    /// （std Mutex，分析在 spawn_blocking 中执行，无 await 需求）。
+    pub(crate) incremental: Mutex<IncrementalCache>,
     /// 同 CacheKey 进行中的分析任务表（singleflight）：
     /// 已登记 key 的后续请求等待其 Notify，完成后重查缓存取结果。
     pub in_flight: Mutex<HashMap<CacheKey, Arc<Notify>>>,
@@ -35,6 +39,7 @@ impl AppState {
     pub fn new(config: AppConfig) -> Arc<Self> {
         Arc::new(Self {
             cache: RwLock::new(SnapshotCache::new(config.cache_capacity)),
+            incremental: Mutex::new(IncrementalCache::new(config.incremental_cache_capacity)),
             config,
             started_at: Instant::now(),
             active_requests: AtomicU32::new(0),

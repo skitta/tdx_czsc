@@ -13,6 +13,7 @@
 
 mod channels;
 mod error;
+mod incremental;
 mod objects;
 mod pivots;
 mod rawbars;
@@ -26,9 +27,11 @@ mod fixtures;
 pub(crate) use channels::SUPPORTED_FUNC_IDS;
 pub use channels::build_channel;
 pub use error::AnalysisError;
+pub(crate) use incremental::{AcceptOutcome, IncrementalCache, IncrementalKey, IncrementalState};
 pub use pivots::build_pivots;
 pub use rawbars::{build_raw_bars, parse_freq};
 pub use segs::{Segment, build_segs};
+pub(crate) use signals::evolve_bars;
 pub use signals::{BuySellPoint, compute_buy_sell_points};
 
 use czsc_core::analyze::CZSC;
@@ -94,6 +97,10 @@ impl From<(&AnalyzeRequest, &AppConfig)> for AnalysisParams {
 }
 
 /// 执行一次全量分析并生成快照（CPU 密集，由调用方放入阻塞线程池）。
+///
+/// 全量路径：请求校验 → 窗口切片 → 单遍演化（`evolve_bars`，结构+信号
+/// 共用一次逐根演化）→ `assemble_snapshot`。增量路径（`enable_incremental`）
+/// 由 handlers 层先行尝试 `incremental` 模块的承接，未命中时回退本函数。
 pub fn build_snapshot(
     request: &AnalyzeRequest,
     params: &AnalysisParams,
@@ -106,12 +113,6 @@ pub fn build_snapshot(
         .ok_or_else(|| AnalysisError::invalid_request("market series is missing"))?;
 
     validate_series_lengths(request.data_len, series)?;
-
-    let requested_func_ids: Vec<u32> = if request.requested_func_ids.is_empty() {
-        vec![101, 102, 201, 301, 302]
-    } else {
-        request.requested_func_ids.clone()
-    };
 
     let analysis_window = options
         .map(|x| x.analysis_window)
@@ -137,16 +138,53 @@ pub fn build_snapshot(
         .filter(|x| *x > 0)
         .unwrap_or(params.min_bi_len) as usize;
 
-    let wants_signals = requested_func_ids.iter().any(|id| (401..=406).contains(id));
-    // 单遍演化（P0）：信号侧从第一根 K 线逐根演化 CZSC，演化终态与
-    // `CZSC::new(bars)` 完全一致（czsc-core 的 new 内部即逐根 update_bar），
-    // 直接复用为结构通道输入，避免对同一窗口做第二遍全量扫描；
-    // 不请求信号通道时仍走 `CZSC::new` 快速路径。
-    let (czsc, mut buy_sell_points) = if wants_signals {
-        compute_buy_sell_points(&bars, max_bi_num, min_bi_len)
-    } else {
-        (CZSC::new(bars, max_bi_num, min_bi_len), Vec::new())
+    let wants_signals = requested_func_ids(request)
+        .iter()
+        .any(|id| (401..=406).contains(id));
+    // 单遍演化（P0）：结构+信号共用一次逐根演化（见 signals::evolve_bars），
+    // 避免"信号演化 + 结构 CZSC::new"的双重全量扫描。
+    let (czsc, evaluator) = evolve_bars(&bars, max_bi_num, min_bi_len, wants_signals);
+    let buy_sell_points = match evaluator {
+        Some(mut ev) => ev.finalize_points(&czsc),
+        None => Vec::new(),
     };
+
+    assemble_snapshot(
+        request,
+        params,
+        freq,
+        max_bi_num,
+        min_bi_len,
+        &czsc,
+        buy_sell_points,
+    )
+}
+
+/// 请求的通道号列表（空时使用默认结构通道集）。
+fn requested_func_ids(request: &AnalyzeRequest) -> Vec<u32> {
+    if request.requested_func_ids.is_empty() {
+        vec![101, 102, 201, 301, 302]
+    } else {
+        request.requested_func_ids.clone()
+    }
+}
+
+/// 由已演化的 CZSC 与确认的买卖点装配快照（全量路径与增量路径共用）
+///
+/// 内部完成：分型/笔列表提取、中枢（前端/后端优化）、段（特征序列
+/// 分型法）、三买/三卖严格化、通道构建、对象映射与快照 meta。
+pub(crate) fn assemble_snapshot(
+    request: &AnalyzeRequest,
+    params: &AnalysisParams,
+    freq: czsc_core::objects::freq::Freq,
+    max_bi_num: usize,
+    min_bi_len: usize,
+    czsc: &CZSC,
+    mut buy_sell_points: Vec<BuySellPoint>,
+) -> Result<AnalysisSnapshot, AnalysisError> {
+    let options = request.options.as_ref();
+    let data_len = request.data_len as usize;
+
     let fractals = czsc.get_fx_list();
     // 已完成的笔（get_finished_bis 已处理"最后一笔待确认"的实时场景：
     // 无包含K线不足 5 根时自动剔除最后一笔）。
@@ -158,7 +196,7 @@ pub fn build_snapshot(
     // 三买/三卖依附中枢严格化：每个中枢最多一个三买或三卖。
     strictize_third_bs_by_zs(&mut buy_sell_points, &pivots);
 
-    let channels = requested_func_ids
+    let channels = requested_func_ids(request)
         .into_iter()
         .map(|func_id| {
             build_channel(
@@ -192,7 +230,7 @@ pub fn build_snapshot(
             input_hash: request.input_hash,
             max_bi_num: max_bi_num as u32,
             min_bi_len: min_bi_len as u32,
-            analysis_window,
+            analysis_window: params.analysis_window,
             generated_at_unix_ms,
             analyzer_version: params.czsc_version.clone(),
         }),
@@ -245,7 +283,7 @@ pub fn build_snapshot(
 }
 
 /// 校验行情序列与 `data_len` 对齐（必需序列非空、可选序列长度一致）。
-fn validate_series_lengths(
+pub(crate) fn validate_series_lengths(
     data_len: u32,
     series: &crate::proto::analysis::MarketSeries,
 ) -> Result<(), AnalysisError> {

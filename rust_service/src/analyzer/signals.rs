@@ -346,15 +346,41 @@ pub(crate) fn evolve_bars(
     min_bi_len: usize,
     wants_signals: bool,
 ) -> (CZSC, Option<SignalEvaluator>) {
+    evolve_bars_profiled(bars, max_bi_num, min_bi_len, wants_signals, None)
+}
+
+/// `evolve_bars` 的剖面版（P1-1）：分离"逐根 update_bar"与"信号评估
+/// observe"两段耗时，供 `SnapshotProfile` 细分（profile=None 时零开销，
+/// 行为与 `evolve_bars` 完全一致）。
+pub(crate) fn evolve_bars_profiled(
+    bars: &[RawBar],
+    max_bi_num: usize,
+    min_bi_len: usize,
+    wants_signals: bool,
+    mut profile: Option<&mut super::SnapshotProfile>,
+) -> (CZSC, Option<SignalEvaluator>) {
+    let tracking = profile.is_some();
     let mut czsc = CZSC::new(vec![bars[0].clone()], max_bi_num, min_bi_len);
     let mut evaluator = wants_signals.then(SignalEvaluator::new);
+    let t0 = std::time::Instant::now();
     if let Some(ev) = evaluator.as_mut() {
         ev.observe(&czsc);
     }
+    if let Some(p) = profile.as_deref_mut() {
+        p.evolve_observe += t0.elapsed();
+    }
     for bar in &bars[1..] {
+        let t1 = tracking.then(std::time::Instant::now);
         czsc.update_bar(bar.clone());
+        if let (Some(p), Some(t1)) = (profile.as_deref_mut(), t1) {
+            p.evolve_update += t1.elapsed();
+        }
+        let t2 = tracking.then(std::time::Instant::now);
         if let Some(ev) = evaluator.as_mut() {
             ev.observe(&czsc);
+        }
+        if let (Some(p), Some(t2)) = (profile.as_deref_mut(), t2) {
+            p.evolve_observe += t2.elapsed();
         }
     }
     (czsc, evaluator)

@@ -17,8 +17,9 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use chrono::NaiveDate;
 use chrono::NaiveDateTime;
+use prost::Message;
 
-use tdx_czsc_service::analyzer::build_snapshot;
+use tdx_czsc_service::analyzer::build_snapshot_profiled;
 use tdx_czsc_service::config::AppConfig;
 use tdx_czsc_service::proto::analysis::{AnalyzeRequest, BarBuildMode, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
@@ -163,8 +164,35 @@ fn main() -> Result<()> {
         t2 - t1
     );
     let params = tdx_czsc_service::analyzer::AnalysisParams::from((&request, &state.config));
-    let snapshot = build_snapshot(&request, &params)?;
+    let mut profile = tdx_czsc_service::analyzer::SnapshotProfile::default();
+    let snapshot = build_snapshot_profiled(&request, &params, Some(&mut profile))?;
     println!("build_snapshot 总耗时: {:?}", started.elapsed());
+
+    // 阶段剖面（P1）：定位"演化之后"的通道/对象/编码成本
+    println!(
+        "\n== 阶段剖面 (P1) ==\n\
+         rawbars            {:?}\n\
+         evolve(单遍)       {:?}\n\
+         ├─ update_bar      {:?}\n\
+         └─ 信号评估 observe {:?}\n\
+         pivots+segs        {:?}\n\
+         channels           {:?}\n\
+         objects            {:?}",
+        profile.rawbars,
+        profile.evolve,
+        profile.evolve_update,
+        profile.evolve_observe,
+        profile.pivots_segs,
+        profile.channels,
+        profile.objects
+    );
+    let t_enc = std::time::Instant::now();
+    let encoded = snapshot.encode_to_vec();
+    println!(
+        "protobuf 编码 {:?} (snapshot {} bytes)",
+        t_enc.elapsed(),
+        encoded.len()
+    );
 
     println!("\n== 通道命中统计 ==");
     for (func_id, name) in CHANNEL_NAMES {

@@ -32,6 +32,7 @@ pub use pivots::build_pivots;
 pub use rawbars::{build_raw_bars, parse_freq};
 pub use segs::{Segment, build_segs};
 pub(crate) use signals::evolve_bars;
+pub(crate) use signals::evolve_bars_profiled;
 pub use signals::{BuySellPoint, compute_buy_sell_points};
 
 use czsc_core::analyze::CZSC;
@@ -105,6 +106,35 @@ pub fn build_snapshot(
     request: &AnalyzeRequest,
     params: &AnalysisParams,
 ) -> Result<AnalysisSnapshot, AnalysisError> {
+    build_snapshot_profiled(request, params, None)
+}
+
+/// 分析阶段耗时剖面（可选收集；不传则零开销，热路径不受影响）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SnapshotProfile {
+    /// 窗口切片 → RawBar（build_raw_bars）
+    pub rawbars: std::time::Duration,
+    /// 单遍演化：结构+信号共用一次逐 bar 演化（evolve_bars）总耗时
+    pub evolve: std::time::Duration,
+    /// evolve 内部：逐根 `czsc.update_bar`（K 线合并/分型/笔）
+    pub evolve_update: std::time::Duration,
+    /// evolve 内部：信号评估（笔结构变化点跑 6 个 czsc-signals 函数）
+    pub evolve_observe: std::time::Duration,
+    /// 中枢 + 段 + 三买/三卖严格化（assemble 前段）
+    pub pivots_segs: std::time::Duration,
+    /// 通道填充（requested_func_ids → build_channel）
+    pub channels: std::time::Duration,
+    /// 对象映射（include_objects 时的分型/笔/中枢/段/信号）
+    pub objects: std::time::Duration,
+}
+
+/// `build_snapshot` 的剖面版（P1-1 性能剖面工具化）：按 `Some(profile)`
+/// 记录各阶段耗时，供 `analyze_csv` 等诊断工具决策优化投入。
+pub fn build_snapshot_profiled(
+    request: &AnalyzeRequest,
+    params: &AnalysisParams,
+    mut profile: Option<&mut SnapshotProfile>,
+) -> Result<AnalysisSnapshot, AnalysisError> {
     let options = request.options.as_ref();
     let data_len = request.data_len as usize;
     let series = request
@@ -121,7 +151,11 @@ pub fn build_snapshot(
 
     let freq = parse_freq(&request.freq_hint)?;
     let window_start = window_start_of(data_len, analysis_window);
+    let t0 = std::time::Instant::now();
     let bars = build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
+    if let Some(p) = profile.as_mut() {
+        p.rawbars += t0.elapsed();
+    }
 
     if bars.is_empty() {
         return Err(AnalysisError::invalid_request(
@@ -143,13 +177,23 @@ pub fn build_snapshot(
         .any(|id| (401..=406).contains(id));
     // 单遍演化（P0）：结构+信号共用一次逐根演化（见 signals::evolve_bars），
     // 避免"信号演化 + 结构 CZSC::new"的双重全量扫描。
-    let (czsc, evaluator) = evolve_bars(&bars, max_bi_num, min_bi_len, wants_signals);
+    let t1 = std::time::Instant::now();
+    let (czsc, evaluator) = evolve_bars_profiled(
+        &bars,
+        max_bi_num,
+        min_bi_len,
+        wants_signals,
+        profile.as_deref_mut(),
+    );
+    if let Some(p) = profile.as_mut() {
+        p.evolve += t1.elapsed();
+    }
     let buy_sell_points = match evaluator {
         Some(mut ev) => ev.finalize_points(&czsc),
         None => Vec::new(),
     };
 
-    assemble_snapshot(
+    assemble_snapshot_profiled(
         request,
         params,
         freq,
@@ -157,6 +201,7 @@ pub fn build_snapshot(
         min_bi_len,
         &czsc,
         buy_sell_points,
+        profile,
     )
 }
 
@@ -197,7 +242,32 @@ pub(crate) fn assemble_snapshot(
     max_bi_num: usize,
     min_bi_len: usize,
     czsc: &CZSC,
+    buy_sell_points: Vec<BuySellPoint>,
+) -> Result<AnalysisSnapshot, AnalysisError> {
+    assemble_snapshot_profiled(
+        request,
+        params,
+        freq,
+        max_bi_num,
+        min_bi_len,
+        czsc,
+        buy_sell_points,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+/// `assemble_snapshot` 的剖面版（P1-1）：按 `profile` 记录 pivots+segs、
+/// 通道填充与对象映射三个阶段。
+fn assemble_snapshot_profiled(
+    request: &AnalyzeRequest,
+    params: &AnalysisParams,
+    freq: czsc_core::objects::freq::Freq,
+    max_bi_num: usize,
+    min_bi_len: usize,
+    czsc: &CZSC,
     mut buy_sell_points: Vec<BuySellPoint>,
+    mut profile: Option<&mut SnapshotProfile>,
 ) -> Result<AnalysisSnapshot, AnalysisError> {
     let options = request.options.as_ref();
     let data_len = request.data_len as usize;
@@ -207,12 +277,17 @@ pub(crate) fn assemble_snapshot(
     // 无包含K线不足 5 根时自动剔除最后一笔）。
     let finished_bis = czsc.get_finished_bis();
     // 中枢：原生 czsc get_zs_seq 输出，再做前端/后端优化（见 pivots.rs）。
+    let t0 = std::time::Instant::now();
     let pivots = build_pivots(&finished_bis);
     // 缠论规则构建段（见 segs.rs：特征序列分型法，段 = 至少 3 笔、首尾同向）。
     let segs = build_segs(&finished_bis);
     // 三买/三卖依附中枢严格化：每个中枢最多一个三买或三卖。
     strictize_third_bs_by_zs(&mut buy_sell_points, &pivots);
+    if let Some(p) = profile.as_mut() {
+        p.pivots_segs += t0.elapsed();
+    }
 
+    let t1 = std::time::Instant::now();
     let channels = requested_func_ids(request)
         .into_iter()
         .map(|func_id| {
@@ -227,6 +302,9 @@ pub(crate) fn assemble_snapshot(
             )
         })
         .collect::<Result<Vec<_>, AnalysisError>>()?;
+    if let Some(p) = profile.as_mut() {
+        p.channels += t1.elapsed();
+    }
 
     let generated_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -234,6 +312,46 @@ pub(crate) fn assemble_snapshot(
         .as_millis() as u64;
 
     let include_objects = options.map(|x| x.include_objects).unwrap_or(false);
+    let t2 = std::time::Instant::now();
+    let (fractals_obj, strokes_obj, pivots_obj, signals_obj, segments_obj) = if include_objects {
+        (
+            fractals
+                .iter()
+                .filter_map(|fx| FractalPoint::try_from(fx).ok())
+                .collect::<Vec<_>>(),
+            finished_bis
+                .iter()
+                .filter_map(|bi| StrokeSegment::try_from(bi).ok())
+                .collect::<Vec<_>>(),
+            pivots
+                .iter()
+                .filter_map(|zs| PivotZone::try_from(zs).ok())
+                .collect::<Vec<_>>(),
+            buy_sell_points
+                .iter()
+                .map(|p| SignalPoint {
+                    index: p.index as u32,
+                    kind: p.kind as i32,
+                    price: p.price,
+                    label: p.label.clone(),
+                })
+                .collect::<Vec<_>>(),
+            segs.iter()
+                .filter_map(|s| map_segment(s, &finished_bis))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        (
+            Vec::<FractalPoint>::new(),
+            Vec::<StrokeSegment>::new(),
+            Vec::<PivotZone>::new(),
+            Vec::<SignalPoint>::new(),
+            Vec::new(),
+        )
+    };
+    if let Some(p) = profile.as_mut() {
+        p.objects += t2.elapsed();
+    }
 
     Ok(AnalysisSnapshot {
         meta: Some(SnapshotMeta {
@@ -252,50 +370,11 @@ pub(crate) fn assemble_snapshot(
             analyzer_version: params.czsc_version.clone(),
         }),
         channels,
-        fractals: if include_objects {
-            fractals
-                .iter()
-                .filter_map(|fx| FractalPoint::try_from(fx).ok())
-                .collect()
-        } else {
-            Vec::new()
-        },
-        strokes: if include_objects {
-            finished_bis
-                .iter()
-                .filter_map(|bi| StrokeSegment::try_from(bi).ok())
-                .collect()
-        } else {
-            Vec::new()
-        },
-        pivots: if include_objects {
-            pivots
-                .iter()
-                .filter_map(|zs| PivotZone::try_from(zs).ok())
-                .collect()
-        } else {
-            Vec::new()
-        },
-        signals: if include_objects {
-            buy_sell_points
-                .iter()
-                .map(|p| SignalPoint {
-                    index: p.index as u32,
-                    kind: p.kind as i32,
-                    price: p.price,
-                    label: p.label.clone(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
-        segments: if include_objects {
-            segs.iter()
-                .filter_map(|s| map_segment(s, &finished_bis))
-                .collect()
-        } else {
-            Vec::new()
-        },
+        fractals: fractals_obj,
+        strokes: strokes_obj,
+        pivots: pivots_obj,
+        signals: signals_obj,
+        segments: segments_obj,
     })
 }
 

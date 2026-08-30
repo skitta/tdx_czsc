@@ -82,7 +82,6 @@ void BuildAnalyzeEnvelope(const AnalyzeRequestCpp& request, tdx::czsc::v1::Reque
     auto* analyze = envelope->mutable_analyze();
     analyze->set_func_group(request.func_group);
     FillRepeatedUInt32(request.requested_func_ids, analyze->mutable_requested_func_ids());
-    analyze->set_symbol_hint(request.symbol_hint);
     analyze->set_freq_hint(request.freq_hint);
     analyze->set_data_len(request.data_len);
     analyze->set_input_hash(request.input_hash);

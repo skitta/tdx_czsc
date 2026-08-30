@@ -353,11 +353,6 @@ fn assemble_snapshot_profiled(
 
     Ok(AnalysisSnapshot {
         meta: Some(SnapshotMeta {
-            symbol: if request.symbol_hint.is_empty() {
-                "TDX".to_string()
-            } else {
-                request.symbol_hint.clone()
-            },
             freq: freq.to_string(),
             data_len: request.data_len,
             input_hash: request.input_hash,
@@ -535,7 +530,6 @@ mod tests {
         let request = AnalyzeRequest {
             func_group: "single_level_structure".to_string(),
             requested_func_ids: vec![101, 102],
-            symbol_hint: "TEST".to_string(),
             freq_hint: "D".to_string(),
             data_len: highs.len() as u32,
             input_hash: 0,

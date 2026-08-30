@@ -54,12 +54,6 @@ pub fn build_raw_bars(
         .as_ref()
         .ok_or_else(|| AnalysisError::invalid_request("market series is missing"))?;
 
-    let symbol = if request.symbol_hint.is_empty() {
-        "TDX".to_string()
-    } else {
-        request.symbol_hint.clone()
-    };
-
     let mut bars = Vec::with_capacity(request.data_len as usize - window_start);
     for i in window_start..request.data_len as usize {
         let dt = resolve_bar_datetime(i, &series.dt_unix_ms, freq)?;
@@ -82,7 +76,7 @@ pub fn build_raw_bars(
         let amount = series.amount.get(i).copied().unwrap_or(0.0) as f64;
 
         let bar = RawBarBuilder::default()
-            .symbol(symbol.clone())
+            .symbol("TDX")
             .dt(dt)
             .id(i as i32)
             .freq(freq)
@@ -163,7 +157,6 @@ mod tests {
         AnalyzeRequest {
             func_group: "single_level_structure".to_string(),
             requested_func_ids: vec![101],
-            symbol_hint: "TEST".to_string(),
             freq_hint: "F30".to_string(),
             data_len: close.len() as u32,
             input_hash: 0,

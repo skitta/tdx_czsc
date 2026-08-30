@@ -344,7 +344,6 @@ fn first_buy_channel_via_proxy_on_synthetic_downtrend() {
     let low: Vec<f32> = bars.iter().map(|b| b.low as f32).collect();
     let close: Vec<f32> = bars.iter().map(|b| b.close as f32).collect();
     let request = analyze_request(
-        "SYN",
         vec![401],
         "D",
         high,

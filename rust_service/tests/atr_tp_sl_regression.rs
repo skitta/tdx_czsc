@@ -397,7 +397,6 @@ fn load_window_with_buy_channels() -> WindowData {
     let n = high.len();
 
     let request = analyze_request(
-        "002340.SZ",
         vec![401, 403, 405],
         "D",
         high.clone(),

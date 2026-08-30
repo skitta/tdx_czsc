@@ -97,7 +97,6 @@ fn third_bs_capped_per_pivot() {
 
     let (_, high, low, close) = load_series("../tests/data/002340_day.csv");
     let request = analyze_request(
-        "002340.SZ",
         vec![401, 402, 403, 404, 405, 406],
         "D",
         high,

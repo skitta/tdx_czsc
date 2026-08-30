@@ -17,7 +17,6 @@ fn build_channels() -> (
     let (dates, high, low, close) = load_series("../tests/data/002340_day.csv");
 
     let request = analyze_request(
-        "002340.SZ",
         vec![301, 302, 303, 304],
         "D",
         high,
@@ -110,9 +109,6 @@ fn pivot_edges_follow_trend_on_real_data() {
     ] {
         let (_, high, low, close) = load_series(csv_path);
         let request = analyze_request(
-            csv_path
-                .trim_start_matches("../tests/data/")
-                .trim_end_matches(".csv"),
             vec![],
             freq_hint,
             high,

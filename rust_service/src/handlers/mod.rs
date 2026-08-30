@@ -93,7 +93,6 @@ mod tests {
             body: Some(RequestBody::Analyze(AnalyzeRequest {
                 func_group: "single_level_structure".to_string(),
                 requested_func_ids: vec![101],
-                symbol_hint: "T".to_string(),
                 freq_hint: "D".to_string(),
                 data_len: series.close.len() as u32,
                 input_hash: 0,

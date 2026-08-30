@@ -21,7 +21,6 @@ fn build() -> (
 ) {
     let (dates, high, low, close) = load_series("../tests/data/002340_day.csv");
     let request = analyze_request(
-        "002340.SZ",
         vec![101, 102, 201, 203, 204],
         "D",
         high,

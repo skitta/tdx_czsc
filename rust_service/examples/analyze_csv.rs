@@ -74,12 +74,6 @@ fn main() -> Result<()> {
     let request = AnalyzeRequest {
         func_group: "single_level_structure".to_string(),
         requested_func_ids: CHANNEL_NAMES.iter().map(|(id, _)| *id).collect(),
-        symbol_hint: path
-            .split(['/', '\\'])
-            .next_back()
-            .unwrap_or("CSV")
-            .trim_end_matches(".csv")
-            .to_string(),
         freq_hint,
         data_len: close,
         input_hash: 0xCAFEBABE,

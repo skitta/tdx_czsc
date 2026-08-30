@@ -80,7 +80,6 @@ pub fn load_raw_bars(path: &str, start: usize) -> Vec<RawBar> {
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn analyze_request(
-    symbol: &str,
     requested_func_ids: Vec<u32>,
     freq_hint: &str,
     high: Vec<f32>,
@@ -91,7 +90,6 @@ pub fn analyze_request(
     include_objects: bool,
 ) -> AnalyzeRequest {
     analyze_request_ex(
-        symbol,
         requested_func_ids,
         freq_hint,
         high,
@@ -109,7 +107,6 @@ pub fn analyze_request(
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn analyze_request_ex(
-    symbol: &str,
     requested_func_ids: Vec<u32>,
     freq_hint: &str,
     high: Vec<f32>,
@@ -124,7 +121,6 @@ pub fn analyze_request_ex(
     AnalyzeRequest {
         func_group: "single_level_structure".to_string(),
         requested_func_ids,
-        symbol_hint: symbol.to_string(),
         freq_hint: freq_hint.to_string(),
         data_len,
         input_hash: 0,

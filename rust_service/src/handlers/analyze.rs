@@ -330,7 +330,6 @@ mod tests {
         AnalyzeRequest {
             func_group: "single_level_structure".to_string(),
             requested_func_ids: vec![101, 901, 902, 903],
-            symbol_hint: "000001.SZ".to_string(),
             freq_hint: "F30".to_string(),
             data_len: close.len() as u32,
             input_hash: 0x22334455,

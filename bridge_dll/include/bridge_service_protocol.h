@@ -21,7 +21,6 @@ struct AnalyzeRequestCpp {
     uint64_t request_id = 0;
     std::string func_group = "single_level_structure";
     std::vector<uint32_t> requested_func_ids;
-    std::string symbol_hint = "TDX";
     std::string freq_hint = "F30";
     uint32_t data_len = 0;
     uint64_t input_hash = 0;

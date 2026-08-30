@@ -135,9 +135,6 @@ message AnalyzeRequest {
   // 服务端可返回整个 group 的全部 channels，DLL 自行缓存和路由。
   repeated uint32 requested_func_ids = 2;
 
-  // 可选：股票代码提示。第一版可为空。
-  string symbol_hint = 3;
-
   // 周期提示，例如："F30" / "D" / "W"
   string freq_hint = 4;
 
@@ -211,7 +208,6 @@ message AnalysisSnapshot {
 }
 
 message SnapshotMeta {
-  string symbol = 1;
   string freq = 2;
   uint32 data_len = 3;
   fixed64 input_hash = 4;

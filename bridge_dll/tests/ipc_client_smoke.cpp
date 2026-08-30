@@ -99,13 +99,11 @@ int main() {
 
     const std::string pipe_name_utf8 = WideToUtf8(config.pipe_name);
     const std::string freq_hint = GetEnvOrDefault("TDX_CZSC_FREQ", "F30");
-    const std::string symbol_hint = GetEnvOrDefault("TDX_CZSC_SYMBOL", "000001.SZ");
 
     tdx_czsc::AnalyzeRequestCpp request;
     request.request_id = 1;
     request.func_group = "single_level_structure";
     request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903};
-    request.symbol_hint = symbol_hint;
     request.freq_hint = freq_hint;
     request.data_len = static_cast<std::uint32_t>(kLen);
     request.input_hash = 0x1122334455667788ULL;

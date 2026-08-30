@@ -97,7 +97,6 @@ async fn growing_series_incremental_equals_full_analysis() {
     let full_state = config_for(MIN_BI_LEN, 0);
     let full_state = AppState::new(full_state);
     let full_req = analyze_request(
-        "002340.SZ",
         REQ_FUNC_IDS.to_vec(),
         "D",
         high[..full_len].to_vec(),
@@ -114,7 +113,6 @@ async fn growing_series_incremental_equals_full_analysis() {
     let inc_state = AppState::new(inc_state);
     let mk_req = |len: usize| {
         analyze_request(
-            "002340.SZ",
             REQ_FUNC_IDS.to_vec(),
             "D",
             high[..len].to_vec(),
@@ -178,7 +176,6 @@ async fn in_place_last_bar_update_equals_full_analysis() {
     let full_state = config_for(MIN_BI_LEN, 0);
     let full_state = AppState::new(full_state);
     let full_req = analyze_request(
-        "002340.SZ",
         REQ_FUNC_IDS.to_vec(),
         "D",
         high_p[..len].to_vec(),
@@ -195,7 +192,6 @@ async fn in_place_last_bar_update_equals_full_analysis() {
     let inc_state = AppState::new(inc_state);
     let mk_req = |h: Vec<f32>, l: Vec<f32>, c: Vec<f32>| {
         analyze_request(
-            "002340.SZ",
             REQ_FUNC_IDS.to_vec(),
             "D",
             h,
@@ -248,7 +244,6 @@ async fn tail_window_growth_falls_back_to_full_but_correct() {
     let full_state = config_for(MIN_BI_LEN, window);
     let full_state = AppState::new(full_state);
     let full_req = analyze_request(
-        "002340.SZ",
         REQ_FUNC_IDS.to_vec(),
         "D",
         high.clone(),
@@ -264,7 +259,6 @@ async fn tail_window_growth_falls_back_to_full_but_correct() {
     let inc_state = AppState::new(inc_state);
     let mk_req = |len: usize| {
         analyze_request(
-            "002340.SZ",
             REQ_FUNC_IDS.to_vec(),
             "D",
             high[..len].to_vec(),
@@ -297,7 +291,6 @@ async fn full_history_window_zero_keeps_all_bis_and_signals() {
     let (_, high, low, close) = load_series(CSV);
     let state = AppState::new(config_for(MIN_BI_LEN, 0));
     let request = analyze_request_ex(
-        "002340.SZ",
         REQ_FUNC_IDS.to_vec(),
         "D",
         high,

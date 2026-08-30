@@ -34,9 +34,14 @@ struct BridgeConfig {
     uint32_t service_startup_wait_ms = 8000;
 
     /// czsc 笔参数，随请求发送给服务端。
-    uint32_t max_bi_num = 50;
+    /// max_bi_num: 全量历史下笔数可达数百根（20 年日线约 400~600 笔），
+    /// 默认 1000（对齐 czsc Python 默认），避免早期笔被清理导致历史
+    /// 结构/买卖点缺失。
+    uint32_t max_bi_num = 1000;
     uint32_t min_bi_len = 6;
-    uint32_t analysis_window = 1000;
+    /// 0 = 全量（默认）：分析传入的全部 K 线，前方历史全部有标注；
+    /// 正数 = 尾部 N 根窗口（窗口首部不稳定，序列增长回退全量分析）。
+    uint32_t analysis_window = 0;
 
     /// DLL 本地快照缓存容量。通达信组合图（日线主图 + 周线/分时附图等）
     /// 每个数据段各占一条，默认 16 覆盖常见多窗口组合；容量不足时旧段被

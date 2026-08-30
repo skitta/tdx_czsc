@@ -14,9 +14,12 @@
 ;service_startup_wait_ms = 8000
 
 # czsc 笔参数（随请求发送给服务端）
-;max_bi_num = 50
+# max_bi_num: 全量历史下笔数可达数百根，默认 1000（对齐 czsc Python 默认）
+;max_bi_num = 1000
 ;min_bi_len = 6
-;analysis_window = 1000
+# analysis_window: 0 = 全量（默认，前方历史全部标注，配合增量稳态维护）；
+# 正数 = 只分析尾部 N 根（注意：固定尾窗口的序列增长会回退全量分析）
+;analysis_window = 0
 
 # 连接与缓存
 ;request_timeout_ms = 500

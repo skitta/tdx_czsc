@@ -8,9 +8,10 @@
 namespace tdx_czsc {
 
 struct AnalyzeOptions {
-    uint32_t max_bi_num = 50;
+    uint32_t max_bi_num = 1000;
     uint32_t min_bi_len = 6;
-    uint32_t analysis_window = 1000;
+    /// 0 = 全量（默认）；正数 = 尾部 N 根窗口。
+    uint32_t analysis_window = 0;
     bool include_channels = true;
     bool include_objects = false;
     bool enable_incremental = false;

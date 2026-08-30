@@ -8,9 +8,7 @@
 #include <sstream>
 #include <string>
 
-#ifdef _WIN32
 #include <Windows.h>
-#endif
 
 namespace tdx_czsc {
 namespace {
@@ -21,7 +19,6 @@ std::mutex& LogMutex() {
 }
 
 std::string WideToUtf8(const std::wstring& input) {
-#ifdef _WIN32
     if (input.empty()) {
         return {};
     }
@@ -36,13 +33,9 @@ std::string WideToUtf8(const std::wstring& input) {
     WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()),
                         result.data(), size_needed, nullptr, nullptr);
     return result;
-#else
-    return std::string(input.begin(), input.end());
-#endif
 }
 
 std::filesystem::path ResolveModuleDirectory() {
-#ifdef _WIN32
     HMODULE module = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -57,9 +50,6 @@ std::filesystem::path ResolveModuleDirectory() {
     }
     buffer.resize(copied);
     return std::filesystem::path(buffer).parent_path();
-#else
-    return std::filesystem::current_path();
-#endif
 }
 
 std::string ResolveLogPath() {
@@ -79,11 +69,7 @@ std::string CurrentTimestamp() {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
 
     std::tm local_tm{};
-#ifdef _WIN32
     localtime_s(&local_tm, &time_t_now);
-#else
-    localtime_r(&time_t_now, &local_tm);
-#endif
 
     std::ostringstream oss;
     oss << std::put_time(&local_tm, "%Y-%m-%d %H:%M:%S")

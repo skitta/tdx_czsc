@@ -6,15 +6,12 @@
 #include <fstream>
 #include <string>
 
-#ifdef _WIN32
 #include <Windows.h>
-#endif
 
 namespace tdx_czsc {
 namespace {
 
 std::wstring ModuleDirectory() {
-#ifdef _WIN32
     wchar_t buffer[MAX_PATH]{};
     // 必须取 DLL 自身的模块句柄：GetModuleFileNameW(nullptr) 返回的是宿主
     // 进程（通达信 TdxW.exe）的路径，会错误地把配置/服务路径解析到通达信
@@ -33,13 +30,9 @@ std::wstring ModuleDirectory() {
         path.resize(pos);
     }
     return path;
-#else
-    return {};
-#endif
 }
 
 std::string WtoUtf8(const std::wstring& input) {
-#ifdef _WIN32
     if (input.empty()) {
         return {};
     }
@@ -53,13 +46,9 @@ std::string WtoUtf8(const std::wstring& input) {
     WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(),
                         size_needed, nullptr, nullptr);
     return result;
-#else
-    return std::string(input.begin(), input.end());
-#endif
 }
 
 std::wstring Utf8ToW(const std::string& input) {
-#ifdef _WIN32
     if (input.empty()) {
         return {};
     }
@@ -72,9 +61,6 @@ std::wstring Utf8ToW(const std::string& input) {
     MultiByteToWideChar(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(),
                         size_needed);
     return result;
-#else
-    return std::wstring(input.begin(), input.end());
-#endif
 }
 
 std::string Trim(std::string s) {
@@ -112,16 +98,12 @@ bool ParseSize(const std::string& text, std::size_t* out) {
 }
 
 const char* EnvValue(const char* name) {
-#ifdef _WIN32
     static thread_local char buffer[128]{};
     const DWORD size = GetEnvironmentVariableA(name, buffer, sizeof(buffer));
     if (size == 0 || size >= sizeof(buffer)) {
         return nullptr;
     }
     return buffer;
-#else
-    return std::getenv(name);
-#endif
 }
 
 /// 对单个配置项应用：INI 值 < 环境变量 < 调用方。

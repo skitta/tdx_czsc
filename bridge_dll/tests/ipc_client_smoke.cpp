@@ -15,7 +15,6 @@
 namespace {
 
 std::string GetEnvOrDefault(const char* name, const std::string& fallback) {
-#ifdef _WIN32
     // MSVC 将 getenv 标记为弃用（C4996），改用 CRT 安全 API。
     char* raw = nullptr;
     size_t len = 0;
@@ -25,13 +24,6 @@ std::string GetEnvOrDefault(const char* name, const std::string& fallback) {
         return value.empty() ? fallback : value;
     }
     return fallback;
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr || *value == '\0') {
-        return fallback;
-    }
-    return value;
-#endif
 }
 
 std::wstring Utf8ToWide(const std::string& input) {
@@ -39,7 +31,6 @@ std::wstring Utf8ToWide(const std::string& input) {
 }
 
 std::string WideToUtf8(const std::wstring& input) {
-#ifdef _WIN32
     if (input.empty()) {
         return {};
     }
@@ -53,9 +44,6 @@ std::string WideToUtf8(const std::wstring& input) {
     WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()),
                         result.data(), size_needed, nullptr, nullptr);
     return result;
-#else
-    return std::string(input.begin(), input.end());
-#endif
 }
 
 std::vector<float> MakeLinearSeries(float start, float step, std::size_t len) {

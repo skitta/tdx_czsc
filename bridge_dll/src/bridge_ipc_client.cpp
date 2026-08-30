@@ -14,15 +14,12 @@
 
 #include "bridge_logging.h"
 
-#ifdef _WIN32
 #include <Windows.h>
-#endif
 
 namespace tdx_czsc {
 namespace {
 
 std::string WideToUtf8(const std::wstring& input) {
-#ifdef _WIN32
     if (input.empty()) {
         return {};
     }
@@ -37,9 +34,6 @@ std::string WideToUtf8(const std::wstring& input) {
     WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()),
                         result.data(), size_needed, nullptr, nullptr);
     return result;
-#else
-    return std::string(input.begin(), input.end());
-#endif
 }
 
 void FillRepeatedFloat(const std::vector<float>& src, google::protobuf::RepeatedField<float>* dst) {
@@ -152,22 +146,12 @@ BridgeIpcClient::BridgeIpcClient(BridgeConfig config) : config_(std::move(config
 bool BridgeIpcClient::Analyze(const AnalyzeRequestCpp& request,
                               AnalysisSnapshotCpp* out_snapshot,
                               std::string* out_error) {
-#ifdef _WIN32
     return AnalyzeImpl(request, out_snapshot, out_error);
-#else
-    (void)request;
-    (void)out_snapshot;
-    if (out_error != nullptr) {
-        *out_error = "BridgeIpcClient is only available on Windows";
-    }
-    return false;
-#endif
 }
 
 bool BridgeIpcClient::AnalyzeImpl(const AnalyzeRequestCpp& request,
                                   AnalysisSnapshotCpp* out_snapshot,
                                   std::string* out_error) {
-#ifdef _WIN32
     if (out_snapshot == nullptr) {
         if (out_error != nullptr) {
             *out_error = "out_snapshot is null";
@@ -226,17 +210,7 @@ bool BridgeIpcClient::AnalyzeImpl(const AnalyzeRequestCpp& request,
         LogError(*out_error);
     }
     return ok;
-#else
-    (void)request;
-    (void)out_snapshot;
-    if (out_error != nullptr) {
-        *out_error = "BridgeIpcClient is only available on Windows";
-    }
-    return false;
-#endif
 }
-
-#ifdef _WIN32
 
 namespace {
 
@@ -576,6 +550,5 @@ bool BridgeIpcClient::ReadFrame(void* pipe_handle,
     }
     return true;
 }
-#endif
 
 }  // namespace tdx_czsc

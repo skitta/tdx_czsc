@@ -315,7 +315,7 @@ fn first_buy_detected_on_synthetic_downtrend() {
     //    演化中"当前末端"创新低即可能命中（czsc 信号为状态型），
     //    因此最早命中点可能在中间向下笔（本样本为 idx=37 的段4 折点），
     //    但末段（力度最弱）必须也产生一个 401 点并锚在末笔端点。
-    let points = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
+    let (_czsc, points) = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
     let anchor = first_buy_anchor_index();
     let buy1s: Vec<&tdx_czsc_service::analyzer::BuySellPoint> =
         points.iter().filter(|p| p.func_id == 401).collect();
@@ -415,7 +415,7 @@ fn first_sell_detected_on_synthetic_uptrend() {
         "一卖信号必须命中（7笔窗口）"
     );
 
-    let points = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
+    let (_czsc, points) = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
     let sell1 = points.iter().find(|p| p.func_id == 402);
     assert!(
         sell1.is_some(),

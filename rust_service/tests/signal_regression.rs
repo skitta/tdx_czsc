@@ -73,7 +73,7 @@ fn final_bi_end_extremes(bars: &[czsc_core::objects::bar::RawBar]) -> HashSet<us
 #[test]
 fn signal_anchors_are_final_bi_endpoints_and_unique() {
     let bars = load_bars("../tests/data/002340_day.csv", 3933 - 1000);
-    let points = compute_buy_sell_points(&bars, 50, 6);
+    let (_czsc, points) = compute_buy_sell_points(&bars, 50, 6);
 
     assert!(!points.is_empty(), "002340 window should produce signals");
 
@@ -103,7 +103,7 @@ fn signal_anchors_are_final_bi_endpoints_and_unique() {
 #[test]
 fn second_bs_attached_to_first_bs() {
     let bars = load_bars("../tests/data/002340_day.csv", 3933 - 1000);
-    let points = compute_buy_sell_points(&bars, 50, 6);
+    let (_czsc, points) = compute_buy_sell_points(&bars, 50, 6);
 
     let mut sorted: Vec<&tdx_czsc_service::analyzer::BuySellPoint> = points.iter().collect();
     sorted.sort_by_key(|p| p.index);

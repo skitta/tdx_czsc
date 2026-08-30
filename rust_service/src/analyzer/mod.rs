@@ -138,13 +138,15 @@ pub fn build_snapshot(
         .unwrap_or(params.min_bi_len) as usize;
 
     let wants_signals = requested_func_ids.iter().any(|id| (401..=406).contains(id));
-    let mut buy_sell_points = if wants_signals {
+    // 单遍演化（P0）：信号侧从第一根 K 线逐根演化 CZSC，演化终态与
+    // `CZSC::new(bars)` 完全一致（czsc-core 的 new 内部即逐根 update_bar），
+    // 直接复用为结构通道输入，避免对同一窗口做第二遍全量扫描；
+    // 不请求信号通道时仍走 `CZSC::new` 快速路径。
+    let (czsc, mut buy_sell_points) = if wants_signals {
         compute_buy_sell_points(&bars, max_bi_num, min_bi_len)
     } else {
-        Vec::new()
+        (CZSC::new(bars, max_bi_num, min_bi_len), Vec::new())
     };
-
-    let czsc = CZSC::new(bars, max_bi_num, min_bi_len);
     let fractals = czsc.get_fx_list();
     // 已完成的笔（get_finished_bis 已处理"最后一笔待确认"的实时场景：
     // 无包含K线不足 5 根时自动剔除最后一笔）。
@@ -346,7 +348,8 @@ mod tests {
         let request = sample_request(false);
         let bars = build_raw_bars(&request, czsc_core::objects::freq::Freq::F30, 0, true)
             .expect("bars should build");
-        let points = compute_buy_sell_points(&bars, 50, 3);
+        let (czsc, points) = compute_buy_sell_points(&bars, 50, 3);
+        assert!(!czsc.bi_list.is_empty(), "演化终态的笔序列非空");
         // 样例数据（64 根、15 笔）可命中 403 二买；信号产出取决于数据形态，
         // 这里只验证与 czsc-signals 的接入管线可运行。
         println!("buy/sell points on sample data: {points:?}");
@@ -507,6 +510,7 @@ mod tests {
     }
 
     /// 性能剖面例程：打印各阶段耗时（配合 --nocapture 观察）。
+    /// P0 后信号演化即结构计算（单遍），不再有独立的 czsc_new 阶段。
     #[test]
     fn profile_analysis_stages() {
         use std::time::Instant;
@@ -516,18 +520,15 @@ mod tests {
         let bars =
             build_raw_bars(&request, czsc_core::objects::freq::Freq::F30, 0, true).expect("bars");
         let t1 = Instant::now();
+        let (czsc, points) = compute_buy_sell_points(&bars, 50, 3);
         let t2 = Instant::now();
-        let points = compute_buy_sell_points(&bars, 50, 3);
-        let t3 = Instant::now();
-        let t4 = Instant::now();
 
         println!(
-            "bars={} build_raw_bars={:?} czsc_new={:?} signals={:?} zs={:?} points={}",
+            "bars={} build_raw_bars={:?} czsc+signals_single_pass={:?} bis={} points={}",
             bars.len(),
             t1 - t0,
             t2 - t1,
-            t3 - t2,
-            t4 - t3,
+            czsc.bi_list.len(),
             points.len()
         );
     }

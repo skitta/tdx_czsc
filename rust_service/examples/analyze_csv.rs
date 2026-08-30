@@ -109,10 +109,11 @@ fn main() -> Result<()> {
     )
     .expect("bars");
     let t1 = std::time::Instant::now();
-    let czsc = czsc_core::analyze::CZSC::new(bars.clone(), 50, min_bi_len);
+    // 单遍演化（P0）：信号侧演化 CZSC 的同时产出完整结构（笔），
+    // 复用其终态作诊断，不再单独 CZSC::new 第二遍。
+    let (czsc, _points) =
+        tdx_czsc_service::analyzer::compute_buy_sell_points(&bars, 50, min_bi_len);
     let t2 = std::time::Instant::now();
-    let _points = tdx_czsc_service::analyzer::compute_buy_sell_points(&bars, 50, min_bi_len);
-    let t3 = std::time::Instant::now();
     // 最后一笔详情: 检查 fx_a/fx_b 分型类型与位置
     {
         let finished = czsc.get_finished_bis();
@@ -154,11 +155,10 @@ fn main() -> Result<()> {
         }
     }
     println!(
-        "分段: bars={} build_raw_bars={:?} czsc_new={:?} signals={:?}",
+        "分段: bars={} build_raw_bars={:?} czsc+signals(单遍)={:?}",
         bars.len(),
         t1 - t0,
-        t2 - t1,
-        t3 - t2
+        t2 - t1
     );
     let params = tdx_czsc_service::analyzer::AnalysisParams::from((&request, &state.config));
     let snapshot = build_snapshot(&request, &params)?;

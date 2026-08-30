@@ -5,6 +5,17 @@
 //! CZSC 并评估信号，记录每个信号首次出现的笔端点，使历史买卖点
 //! 都能在图上标注出来。
 //!
+//! **性能（P0 单遍化）**：演化完成的 CZSC 终态与 `CZSC::new(bars)`
+//! 完全一致（czsc-core 的 `new` 内部即逐根 `update_bar`），因此本函数
+//! 直接返回演化终态，供结构通道（分型/笔/中枢/段）复用——同一窗口
+//! 只跑一遍逐 bar 演化，不再做第二遍全量扫描。
+//!
+//! **为什么不做"最终态一次性评估"**：czsc-signals 的 4 个信号函数
+//! （`cxt_first_buy/sell`、`cxt_second/third_bs`）都只检查 `bi_list`
+//! **尾部窗口**（最近 5/21/19/... 笔）。若只在最终状态评估一次，
+//! 只能发现最新笔结构当前的信号，历史买卖点（演化过程中曾命中的）
+//! 会全部消失。逐根演化是保留全部历史买卖点的必要方式。
+//!
 //! **量能数据来源**（一买/一卖的"量能力度"维度）：
 //! 量能由 `build_raw_bars` 按三级来源链填充（见 `analyzer/mod.rs`）：
 //! ① 请求携带的真实 vol（公式 950 量能通道融合 / CSV 工具链）；
@@ -116,6 +127,10 @@ const SIGNAL_SPECS: [SignalSpec; 6] = [
 
 /// 逐根 K 线演化 CZSC 并评估全部买卖点信号。
 ///
+/// 返回 `(演化完成的 CZSC, 确认的买卖点)`：演化终态与
+/// `CZSC::new(bars)` 等价，调用方应复用它作为结构通道输入
+/// （见模块文档"P0 单遍化"）。`bars` 必须非空（由调用方保证）。
+///
 /// 信号函数共用同一个 TaCache，保证均线等中间结果一致。
 ///
 /// 性能：所有信号函数只依赖已完成笔序列（bi_list），笔结构不变时
@@ -184,10 +199,11 @@ pub fn compute_buy_sell_points(
     bars: &[RawBar],
     max_bi_num: usize,
     min_bi_len: usize,
-) -> Vec<BuySellPoint> {
-    if bars.is_empty() {
-        return Vec::new();
-    }
+) -> (CZSC, Vec<BuySellPoint>) {
+    assert!(
+        !bars.is_empty(),
+        "compute_buy_sell_points requires non-empty bars"
+    );
 
     let mut czsc = CZSC::new(vec![bars[0].clone()], max_bi_num, min_bi_len);
     let mut cache = TaCache::new();
@@ -300,7 +316,7 @@ pub fn compute_buy_sell_points(
         }
     }
     best_by_anchor.sort_by_key(|p| p.index);
-    best_by_anchor
+    (czsc, best_by_anchor)
 }
 
 /// 笔结构指纹：(笔数量, 最后一笔端点分型中间 K 线 id)。

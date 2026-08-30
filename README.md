@@ -307,6 +307,18 @@ cargo run --example analyze_csv -- ../tests/data/002340_day.csv 6
 - `TDX_CZSC_MAX_BI_NUM` / `TDX_CZSC_MIN_BI_LEN` / `TDX_CZSC_ANALYSIS_WINDOW`：
   分析参数（默认 1000/6/**0**；`0` = 全量，即分析通达信传入的全部 K 线）。
 
+**服务端参数**（`tdx_czsc_service.ini`，与 exe 同目录，可选；不存在时用内置
+默认；环境变量 `TDX_CZSC_*` 优先级最高，样例见
+`rust_service/tdx_czsc_service.ini.example`）：
+
+- `analysis_parallelism`（默认 4）：全量分析并发上限；
+- `enable_incremental`（默认 true）/ `incremental_cache_capacity`（默认 8）：
+  增量分析与状态缓存；
+- `cache_capacity`（默认 64）：服务端快照缓存条数；
+- `derive_volume_proxy`（默认 true）：量能代理兜底开关；
+- `max_bi_num` / `min_bi_len` / `analysis_window`：请求缺省时的兜底值
+  （正常流程 DLL 每请求都会下发这三个值，覆盖此处）。
+
 ---
 
 ## 项目状态 & Roadmap

@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     let log_path = parse_log_arg();
     init_tracing(log_path);
 
-    let config = AppConfig::default();
+    let config = AppConfig::load();
     let state = AppState::new(config.clone());
 
     info!(

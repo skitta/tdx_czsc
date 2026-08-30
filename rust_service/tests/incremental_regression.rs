@@ -191,16 +191,7 @@ async fn in_place_last_bar_update_equals_full_analysis() {
     let inc_state = config_for(MIN_BI_LEN, 0);
     let inc_state = AppState::new(inc_state);
     let mk_req = |h: Vec<f32>, l: Vec<f32>, c: Vec<f32>| {
-        analyze_request(
-            REQ_FUNC_IDS.to_vec(),
-            "D",
-            h,
-            l,
-            c,
-            MIN_BI_LEN,
-            0,
-            false,
-        )
+        analyze_request(REQ_FUNC_IDS.to_vec(), "D", h, l, c, MIN_BI_LEN, 0, false)
     };
     let _orig = analyze_once(
         &inc_state,

@@ -7,7 +7,7 @@
 | Version | Supported |
 |---|---|
 | master | ✅ |
-| < 0.1.0 | ❌ |
+| < 0.9.0 | ❌ |
 
 ## Reporting a Vulnerability
 

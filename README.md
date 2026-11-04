@@ -86,6 +86,8 @@ flowchart LR
 - ✅ **ATR 止盈止损模板**：`tdx_formula_examples/atr_tp_sl.tn6`（一买/二买/三买
   各自独立成段、互不合并：每类买点各画一对 ATR 动态止盈/止损线，可同时并存；
   K 线穿线即终止该类线的绘画；仅 4 个参数，含影子回归测试）
+- ✅ **缠论选股公式**：`tdx_formula_examples/chan_select.tn6`（条件选股公式：
+  30 分钟级别买点 + 无卖点 + 信号放量 + 日线向上确认的多周期联立口径）
 
 ---
 
@@ -197,6 +199,20 @@ K 线上穿止盈线或下穿止损线即终止该买点的线（不输出文字
 不含缠论结构线**；参数仅 4 个（ATR 周期/止损倍数/止盈倍数/触发方式），改数字
 即可调整。
 
+仅日线显示（单脚本周期限定）：`tdx_formula_examples/atr_sl_day.tn6` 内置
+`PERIOD` 周期门控，**只在日线周期显示止损线，分钟/周/月等其他周期自动不显示**
+（输出 DRAWNULL；注意 PERIOD 的日线编码因通达信版本而异，默认按 5=日线，
+不一致时先输出 PERIOD 验证再改）。若需分钟周期直接使用日线结果画线，因通达信
+跨周期引用必须引用独立公式，需自行按"日线源公式 + 分钟引用公式"双脚本模式扩展。
+
+缠论选股公式：以"条件选股公式"导入 `tdx_formula_examples/chan_select.tn6`，
+选股器（`ctrl+T`）中**周期选 30 分钟**执行。口径（多周期联立）：
+① 最近 5 个交易日（参数 `回看:=40` 根 30 分钟 K 线）内出现缠论买点（一买/二买/
+三买）；② 窗口期内无卖点；③ 窗口内买点信号当日放量（VOL > 前 5 根均量 ×
+`放量系数:=1.2`）；④ **日线向上确认**：日线收盘高于上一交易日且高于 5 个交易日
+前（`CLOSE#DAY` 跨周期引用）。真机首跑前确认两验证项：选股器批量执行时 DLL
+通道正常返回、`#DAY` 跨周期引用可用（不可用时公式内有后备写法注释）。
+
 ---
 
 ## 通道说明 Channels
@@ -239,7 +255,7 @@ tdx_czsc/
 │   ├── examples/analyze_csv.rs # 离线 CSV 分析工具（脱离通达信验证算法）
 │   └── tests/                  # 真实数据回归测试（通路/段/中枢/信号/背驰）
 ├── bridge_dll/                 # x64 C++ DLL（通达信加载）+ 冒烟测试 + ini 样例
-├── tdx_formula_examples/       # 通达信公式模板（main_chart_full / atr_tp_sl / buy_sell_expert / buy_sell_mark）
+├── tdx_formula_examples/       # 通达信公式模板（main_chart_full / atr_tp_sl / atr_sl_day / buy_sell_expert / buy_sell_mark / chan_select）
 ├── tests/data/                 # 回归测试真实行情 CSV
 ├── docs/                       # 技术方案 + 通达信 DLL 编程规范
 ├── deploy_to_tdx.bat           # 一键部署：构建服务与 DLL 并拷贝到通达信
@@ -347,7 +363,7 @@ cargo run --example analyze_csv -- ../tests/data/002340_day.csv 6
 
 | 文档 | 内容 |
 |---|---|
-[`docs/使用说明.md`](docs/使用说明.md) | 部署、通达信系统设置、公式导入、日常使用与常见问题 |
+| [`docs/使用说明.md`](docs/使用说明.md) | 部署、通达信系统设置、公式导入、日常使用与常见问题 |
 | [`docs/技术方案_通达信缠论自动标注系统.md`](docs/技术方案_通达信缠论自动标注系统.md) | 总体方案：协议、通道设计、中枢/段绘制规则、配置与验收 |
 | [`docs/通达信DLL函数编程规范/`](docs/通达信DLL函数编程规范) | 通达信官方 DLL 编程规范与示例插件（**第三方材料，版权归官方**，见目录内 README） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |

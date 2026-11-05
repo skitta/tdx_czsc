@@ -100,6 +100,35 @@ jobs:
       - name: Build bridge DLL (Release)
         run: cmake --build bridge_dll/build --config Release
 
+      # 临时诊断：定位 protobuf 库与生成代码版本/导出不一致导致的 LNK2019
+      - name: Diagnose protobuf linkage
+        if: always()
+        shell: pwsh
+        run: |
+          $cache = "bridge_dll/build/CMakeCache.txt"
+          if (Test-Path $cache) {
+            "=== CMakeCache Protobuf 项 ==="
+            Select-String -Path $cache -Pattern "Protobuf" | ForEach-Object { $_.Line }
+          }
+          $installed = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/x64-windows"
+          "=== vcpkg protobuf 文件 ==="
+          Get-ChildItem "$installed/lib/libprotobuf.*", "$installed/bin/libprotobuf.dll" -ErrorAction SilentlyContinue |
+            Format-Table Name, Length, LastWriteTime
+          "=== 运行时版本头 ==="
+          Select-String -Path "$installed/include/google/protobuf/runtime_version.h" -Pattern "VERSION" -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.Line }
+          foreach ($f in @("$installed/lib/libprotobuf.lib", "$installed/bin/libprotobuf.dll")) {
+            if (Test-Path $f) {
+              $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($f))
+              "$([System.IO.Path]::GetFileName($f)): fixed_address_empty_string=$($ascii.Contains('fixed_address_empty_string')) GlobalEmptyStringConstexpr=$($ascii.Contains('GlobalEmptyStringConstexpr'))"
+            }
+          }
+          "=== 实际编译命令行片段 ==="
+          & cmake --build bridge_dll/build --config Release --verbose 2>&1 |
+            Select-String -Pattern "analysis.pb|PROTOBUF_USE_DLLS|libprotobuf.lib" |
+            Select-Object -First 12 |
+            ForEach-Object { $_.Line.Substring(0, [Math]::Min(500, $_.Line.Length)) }
+
       - name: Assemble package directory
         shell: pwsh
         run: |

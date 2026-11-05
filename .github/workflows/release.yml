@@ -24,6 +24,8 @@ env:
   PROTOC_VERSION: "27.3"
   # vcpkg 二进制缓存目录，配合 actions/cache 避免每次重编译 protobuf C++ 运行时。
   VCPKG_BINARY_SOURCES: "clear;files,C:\\vcpkg-cache,readwrite"
+  # Bridge DLL 的依赖由 bridge_dll/vcpkg.json 声明（protobuf 版本已在其中固定）。
+  VCPKG_INSTALLED_DIR_PATH: "bridge_dll/vcpkg_installed"
 
 jobs:
   windows-x64:
@@ -67,8 +69,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: C:\vcpkg-cache
-          key: vcpkg-protobuf-${{ runner.os }}
-          restore-keys: vcpkg-protobuf-
+          key: vcpkg-protobuf-${{ runner.os }}-${{ hashFiles('bridge_dll/vcpkg.json') }}
+          restore-keys: vcpkg-protobuf-${{ runner.os }}-
 
       - name: Ensure vcpkg available
         shell: pwsh
@@ -83,51 +85,25 @@ jobs:
           }
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" version
 
-      - name: Install protobuf (vcpkg, x64-windows)
+      - name: Install protobuf (vcpkg manifest)
         shell: pwsh
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install protobuf:x64-windows
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install protobuf:x64-windows 失败" }
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install --triplet x64-windows `
+            --x-manifest-root=bridge_dll --x-install-root="$env:VCPKG_INSTALLED_DIR_PATH"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg manifest install 失败" }
 
       - name: Configure bridge DLL
         shell: pwsh
         run: |
           cmake -S bridge_dll -B bridge_dll/build -A x64 `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DVCPKG_MANIFEST_INSTALL=OFF `
+            -DVCPKG_INSTALLED_DIR="$PWD\bridge_dll\vcpkg_installed"
           if ($LASTEXITCODE -ne 0) { throw "cmake configure 失败" }
 
       - name: Build bridge DLL (Release)
         run: cmake --build bridge_dll/build --config Release
-
-      # 临时诊断：定位 protobuf 库与生成代码版本/导出不一致导致的 LNK2019
-      - name: Diagnose protobuf linkage
-        if: always()
-        shell: pwsh
-        run: |
-          $cache = "bridge_dll/build/CMakeCache.txt"
-          if (Test-Path $cache) {
-            "=== CMakeCache Protobuf 项 ==="
-            Select-String -Path $cache -Pattern "Protobuf" | ForEach-Object { $_.Line }
-          }
-          $installed = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/x64-windows"
-          "=== vcpkg protobuf 文件 ==="
-          Get-ChildItem "$installed/lib/libprotobuf.*", "$installed/bin/libprotobuf.dll" -ErrorAction SilentlyContinue |
-            Format-Table Name, Length, LastWriteTime
-          "=== 运行时版本头 ==="
-          Select-String -Path "$installed/include/google/protobuf/runtime_version.h" -Pattern "VERSION" -ErrorAction SilentlyContinue |
-            ForEach-Object { $_.Line }
-          foreach ($f in @("$installed/lib/libprotobuf.lib", "$installed/bin/libprotobuf.dll")) {
-            if (Test-Path $f) {
-              $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($f))
-              "$([System.IO.Path]::GetFileName($f)): fixed_address_empty_string=$($ascii.Contains('fixed_address_empty_string')) GlobalEmptyStringConstexpr=$($ascii.Contains('GlobalEmptyStringConstexpr'))"
-            }
-          }
-          "=== 实际编译命令行片段 ==="
-          & cmake --build bridge_dll/build --config Release --verbose 2>&1 |
-            Select-String -Pattern "analysis.pb|PROTOBUF_USE_DLLS|libprotobuf.lib" |
-            Select-Object -First 12 |
-            ForEach-Object { $_.Line.Substring(0, [Math]::Min(500, $_.Line.Length)) }
 
       - name: Assemble package directory
         shell: pwsh
@@ -137,7 +113,7 @@ jobs:
           Copy-Item "rust_service/target/release/tdx_czsc_service.exe" $dist
           Copy-Item "bridge_dll/build/Release/tdx_czsc_bridge.dll" $dist
           # protobuf C++ 运行时：DLL 侧动态依赖，必须与 tdx_czsc_bridge.dll 同目录
-          $vcpkgBin = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed/x64-windows/bin"
+          $vcpkgBin = Join-Path $env:VCPKG_INSTALLED_DIR_PATH "x64-windows/bin"
           foreach ($pattern in @("libprotobuf.dll", "abseil_dll.dll", "utf8*.dll")) {
             Get-ChildItem -Path $vcpkgBin -Filter $pattern -ErrorAction SilentlyContinue |
               Copy-Item -Destination $dist

@@ -127,6 +127,7 @@ TDXDLL1(func_id, HIGH, LOW, CLOSE)
 | Rust | stable（`rust_service/Cargo.toml`，edition 2024） |
 | `protoc` | 需在 PATH（或设 `PROTOC` 环境变量，`build.rs` 生成协议） |
 | CMake + MSVC | x64 工具链（构建 Bridge DLL） |
+| vcpkg | 提供 protobuf C++ 运行时；依赖与版本声明在 `bridge_dll/vcpkg.json` |
 | 通达信 | x64 版本（验证显示） |
 
 ### 1. 构建与运行 Rust 服务
@@ -142,7 +143,8 @@ macOS/Linux 下同样可 `cargo check` / `cargo test`（服务端逻辑），仅
 
 ```powershell
 cd bridge_dll
-cmake -S . -B build -A x64
+# vcpkg 依赖（protobuf 版本固定在 vcpkg.json）由 CMake toolchain 自动安装到 build\vcpkg_installed
+cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT\scripts\buildsystems\vcpkg.cmake"
 cmake --build build --config Release
 build\Release\tdx_czsc_ipc_smoke_test.exe   # 先跑控制台 IPC 测试
 ```

@@ -71,5 +71,6 @@ jobs:
         working-directory: rust_service
         run: cargo test --all-targets
 
-  # Bridge DLL 需要 vcpkg 提供的 protobuf C++ 运行时，CI 成本高，
-  # 构建与冒烟测试按 README 在本机 Windows x64 验证。
+  # Bridge DLL 需要 vcpkg 提供的 protobuf C++ 运行时，常规 CI 不做 DLL 构建；
+  # 发布用的 DLL 由 .github/workflows/release.yml 构建，冒烟测试仍按 README
+  # 在本机 Windows x64 + 通达信环境验证。

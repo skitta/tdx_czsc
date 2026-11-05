@@ -1,10 +1,16 @@
-use anyhow::{Context, Result};
-use prost::Message;
+use anyhow::Result;
 
-use crate::handlers;
-use crate::proto::analysis::RequestEnvelope;
 use crate::state::AppState;
 
+#[cfg(windows)]
+use anyhow::Context;
+#[cfg(windows)]
+use prost::Message;
+
+#[cfg(windows)]
+use crate::handlers;
+#[cfg(windows)]
+use crate::proto::analysis::RequestEnvelope;
 #[cfg(windows)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
@@ -22,7 +28,7 @@ pub async fn run_server(state: std::sync::Arc<AppState>) -> Result<()> {
     #[cfg(not(windows))]
     {
         let _ = state;
-        Err(anyhow!(
+        Err(anyhow::anyhow!(
             "named pipe server is only supported on Windows hosts"
         ))
     }

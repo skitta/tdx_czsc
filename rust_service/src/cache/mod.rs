@@ -5,13 +5,16 @@ use crate::proto::analysis::AnalysisSnapshot;
 /// 快照缓存键：请求中影响分析结果的参数子集（与 DLL 侧指纹约定一致）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    pub func_group: String,
     pub input_hash: u64,
     pub data_len: u32,
     pub freq_hint: String,
     pub max_bi_num: u32,
     pub min_bi_len: u32,
     pub analysis_window: u32,
+    /// 排序去重后的请求通道集合；不同子集不能共用快照。
+    pub requested_func_ids: Vec<u32>,
+    /// include_objects 会改变快照对象字段，必须参与缓存键。
+    pub include_objects: bool,
 }
 
 #[derive(Debug)]

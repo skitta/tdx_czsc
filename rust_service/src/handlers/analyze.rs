@@ -21,8 +21,36 @@ async fn await_in_flight_result(
     cache_key: &CacheKey,
     started: Instant,
 ) -> Option<AnalyzeResponse> {
-    let notify = state.in_flight.lock().unwrap().get(cache_key).cloned()?;
-    let _ = tokio::time::timeout(Duration::from_secs(15), notify.notified()).await;
+    // 在 in_flight 锁内创建并 enable 等待 future：owner 必须先拿同一把锁
+    // 才能移除登记并 notify_waiters()，因此不会出现“通知早于 waiter 注册”
+    // 的丢失唤醒（Notify::notify_waiters 不保存许可）。
+    loop {
+        let notify = {
+            let guard = state.in_flight.lock().unwrap();
+            guard.get(cache_key).cloned()
+        };
+        let Some(notify) = notify else {
+            break;
+        };
+        let mut notified = Box::pin(notify.notified());
+        let wait_for_this = {
+            let guard = state.in_flight.lock().unwrap();
+            match guard.get(cache_key) {
+                // owner 已移除登记：无论它写入缓存与否，都重新查缓存。
+                None => break,
+                // 已有新 owner 接管：改等新实例，不能等旧通知。
+                Some(current) if !Arc::ptr_eq(current, &notify) => false,
+                Some(_) => {
+                    notified.as_mut().enable();
+                    true
+                }
+            }
+        };
+        if wait_for_this {
+            let _ = tokio::time::timeout(Duration::from_secs(15), notified).await;
+            break;
+        }
+    }
 
     let cache = state.cache.read().await;
     let mut snapshot = cache.get(cache_key)?;
@@ -48,9 +76,11 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
     let started = Instant::now();
     let _guard = ActiveRequestGuard::new(state.clone());
     let options = request.options.unwrap_or_default();
+    let mut requested_func_ids = request.requested_func_ids.clone();
+    requested_func_ids.sort_unstable();
+    requested_func_ids.dedup();
 
     let cache_key = CacheKey {
-        func_group: request.func_group.clone(),
         input_hash: request.input_hash,
         data_len: request.data_len,
         freq_hint: request.freq_hint.clone(),
@@ -69,6 +99,8 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
         } else {
             state.config.default_analysis_window
         },
+        requested_func_ids,
+        include_objects: options.include_objects,
     };
 
     // 1) 已有分析结果：直接命中缓存返回
@@ -90,28 +122,26 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
     let mut registered = false;
     let mut attempts = 0;
     loop {
-        // 仅探测是否已有同数据段在途分析；实际等待在 await_in_flight_result
-        // 内部完成（拿到 Notify 后 notified() 超时等待）。
-        let has_in_flight = state.in_flight.lock().unwrap().contains_key(&cache_key);
-        if !has_in_flight {
+        // 原子 check-and-insert：谁先插入谁负责分析；失败者等待 owner，
+        // 而不是在“key 已存在”时继续进入分析造成重复全量。
+        {
+            let mut lock = state.in_flight.lock().unwrap();
+            if !lock.contains_key(&cache_key) {
+                lock.insert(cache_key.clone(), Arc::new(tokio::sync::Notify::new()));
+                registered = true;
+            }
+        }
+        if registered {
             break;
         }
         attempts += 1;
         if attempts > 2 {
-            break; // 双轮在途等待无果：直接分析兜底（不登记，避免泄漏）
+            // 两轮等待仍无结果：直接分析兜底，避免永久挂起。
+            break;
         }
         if let Some(resp) = await_in_flight_result(state, &cache_key, started).await {
             return Ok(resp);
         }
-    }
-    if !registered {
-        // 双检登记：等待期间可能已有请求抢先登记
-        let mut lock = state.in_flight.lock().unwrap();
-        if !lock.contains_key(&cache_key) {
-            lock.insert(cache_key.clone(), Arc::new(tokio::sync::Notify::new()));
-            registered = true;
-        }
-        drop(lock);
     }
 
     // 3) 并发上限：等待可用分析槽（防止多窗口同时全量分析打满 CPU）
@@ -167,13 +197,14 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
         }
     };
 
-    // 6) 写缓存并唤醒同数据段的等待者（无论如何都通知）
-    if registered {
-        release_in_flight(state, &cache_key);
-    }
+    // 6) 先写缓存，再唤醒同数据段的等待者：等待方被唤醒后一定能读到结果，
+    //    不会在“已通知、未写缓存”的窗口里重新发起一次全量分析。
     {
         let mut cache = state.cache.write().await;
-        cache.insert(cache_key, snapshot.clone());
+        cache.insert(cache_key.clone(), snapshot.clone());
+    }
+    if registered {
+        release_in_flight(state, &cache_key);
     }
 
     let elapsed_ms = started.elapsed().as_millis() as u32;
@@ -442,6 +473,52 @@ mod tests {
             state.total_analyses.load(Ordering::Relaxed),
             before,
             "缓存命中不得触发新的全量分析"
+        );
+    }
+
+    /// 不同请求通道集合不得共用缓存，否则子集请求会拿到缺通道的快照。
+    #[tokio::test]
+    async fn different_channel_sets_do_not_share_cache() {
+        let state = state();
+        let mut first = sample_request(false);
+        first.requested_func_ids = vec![101];
+        let first = handle(&state, first).await.expect("first analyze");
+        assert!(!first.service_cache_hit);
+
+        let mut second = sample_request(true);
+        second.requested_func_ids = vec![401];
+        let second = handle(&state, second).await.expect("second analyze");
+        assert!(
+            !second.service_cache_hit,
+            "不同 requested_func_ids 不得命中同一份快照"
+        );
+        assert!(
+            second
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .channels
+                .iter()
+                .any(|channel| channel.func_id == 401),
+            "第二次请求必须包含 401 通道"
+        );
+    }
+
+    /// func_group 不改变全通道快照内容，不应拆成两份缓存并重复分析。
+    #[tokio::test]
+    async fn func_group_does_not_split_cache() {
+        let state = state();
+        let mut first = sample_request(false);
+        first.func_group = "single_level_structure".to_string();
+        let first = handle(&state, first).await.expect("first analyze");
+        assert!(!first.service_cache_hit);
+
+        let mut second = sample_request(true);
+        second.func_group = "single_level_signals".to_string();
+        let second = handle(&state, second).await.expect("second analyze");
+        assert!(
+            second.service_cache_hit,
+            "func_group 不影响输出，不应拆分缓存"
         );
     }
 }

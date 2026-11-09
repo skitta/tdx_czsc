@@ -572,7 +572,7 @@ pub(crate) struct SignalEvaluator {
     pending: Vec<PendingPoint>,
     // 每个通道上一次评估时的命中值：命中值变化（从无到有或换类型）才挂起新信号
     prev_hit: [Option<&'static str>; SIGNAL_SPECS.len()],
-    last_bi_state: Option<(usize, i32)>,
+    last_bi_state: Option<(usize, i32, u64)>,
     bs_state: BuySellState,
 }
 
@@ -766,16 +766,34 @@ pub fn compute_buy_sell_points(
     (czsc, points)
 }
 
-/// 笔结构指纹：(笔数量, 最后一笔端点分型中间 K 线 id)。
-/// 两者都不变时已完成笔序列完全一致，信号不会变化。
-fn bi_state_fingerprint(czsc: &CZSC) -> (usize, i32) {
+/// 笔结构指纹：(笔数量, 最后一笔端点分型中间 K 线 id, 末根 K 线内容哈希)。
+///
+/// 末根 K 线必须参与指纹：盘中同 dt 原地更新时 id 和笔数量不变，
+/// 但价格/量能变化仍可能让信号命中状态翻转。
+fn bi_state_fingerprint(czsc: &CZSC) -> (usize, i32, u64) {
     let last_fx_b_id = czsc
         .bi_list
         .last()
         .and_then(|bi| bi.fx_b.elements.get(1))
         .map(|bar| bar.id)
         .unwrap_or(-1);
-    (czsc.bi_list.len(), last_fx_b_id)
+    let last_bar_hash = czsc
+        .bars_raw
+        .last()
+        .map(|bar| {
+            let mut hash = 1469598103934665603u64;
+            let mut mix = |value: u64| {
+                hash ^= value;
+                hash = hash.wrapping_mul(1099511628211);
+            };
+            mix(bar.id as u64);
+            for value in [bar.high, bar.low, bar.close, bar.vol] {
+                mix(value.to_bits());
+            }
+            hash
+        })
+        .unwrap_or(0);
+    (czsc.bi_list.len(), last_fx_b_id, last_bar_hash)
 }
 
 fn signal_hits(signal: &Signal, hit_value: &str) -> bool {
@@ -818,5 +836,34 @@ mod tests {
     fn specs_cover_all_signal_channels() {
         let func_ids: Vec<u32> = SIGNAL_SPECS.iter().map(|s| s.func_id).collect();
         assert_eq!(func_ids, vec![401, 402, 403, 404, 405, 406]);
+    }
+
+    #[test]
+    fn fingerprint_changes_when_last_bar_price_changes() {
+        use std::sync::Arc;
+
+        use chrono::Utc;
+        use czsc_core::objects::bar::RawBar;
+        use czsc_core::objects::freq::Freq;
+
+        let make_bar = |close: f64| RawBar {
+            symbol: Arc::from("T"),
+            dt: Utc::now(),
+            freq: Freq::F30,
+            open: close,
+            close,
+            high: close + 1.0,
+            low: close - 1.0,
+            vol: 1.0,
+            amount: 0.0,
+            id: 0,
+        };
+        let czsc_a = CZSC::new(vec![make_bar(10.0)], 1000, 6);
+        let czsc_b = CZSC::new(vec![make_bar(11.0)], 1000, 6);
+        assert_ne!(
+            bi_state_fingerprint(&czsc_a),
+            bi_state_fingerprint(&czsc_b),
+            "末根价格变化必须改变信号指纹"
+        );
     }
 }

@@ -6,6 +6,8 @@ use crate::state::AppState;
 use anyhow::Context;
 #[cfg(windows)]
 use prost::Message;
+#[cfg(windows)]
+use std::time::Duration;
 
 #[cfg(windows)]
 use crate::handlers;
@@ -15,6 +17,8 @@ use crate::proto::analysis::RequestEnvelope;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+#[cfg(windows)]
+use tokio::time::timeout;
 #[cfg(windows)]
 use tracing::{info, warn};
 
@@ -95,16 +99,26 @@ async fn handle_client(mut server: NamedPipeServer, state: std::sync::Arc<AppSta
 }
 
 #[cfg(windows)]
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(windows)]
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(windows)]
 async fn read_frame(server: &mut NamedPipeServer) -> Result<Vec<u8>> {
-    let len = server
-        .read_u32_le()
+    let len = timeout(FRAME_READ_TIMEOUT, server.read_u32_le())
         .await
+        .context("timed out reading frame length")?
         .context("failed to read frame length")? as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(anyhow::anyhow!(
+            "frame length {len} exceeds limit {MAX_FRAME_BYTES}"
+        ));
+    }
 
     let mut buf = vec![0u8; len];
-    server
-        .read_exact(&mut buf)
+    timeout(FRAME_READ_TIMEOUT, server.read_exact(&mut buf))
         .await
+        .context("timed out reading frame payload")?
         .context("failed to read frame payload")?;
     Ok(buf)
 }

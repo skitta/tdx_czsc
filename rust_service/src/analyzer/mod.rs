@@ -70,18 +70,6 @@ pub struct AnalysisParams {
     pub czsc_version: String,
 }
 
-impl From<&AppConfig> for AnalysisParams {
-    fn from(config: &AppConfig) -> Self {
-        Self {
-            analysis_window: config.default_analysis_window,
-            max_bi_num: config.max_bi_num,
-            min_bi_len: config.min_bi_len,
-            derive_volume_proxy: config.derive_volume_proxy,
-            czsc_version: config.czsc_version.clone(),
-        }
-    }
-}
-
 impl From<(&AnalyzeRequest, &AppConfig)> for AnalysisParams {
     fn from((request, config): (&AnalyzeRequest, &AppConfig)) -> Self {
         let options = request.options.as_ref();
@@ -276,6 +264,10 @@ fn assemble_snapshot_profiled(
 ) -> Result<AnalysisSnapshot, AnalysisError> {
     let options = request.options.as_ref();
     let data_len = request.data_len as usize;
+    let analysis_window = options
+        .map(|x| x.analysis_window)
+        .filter(|x| *x > 0)
+        .unwrap_or(params.analysis_window);
 
     let fractals = czsc.get_fx_list();
     // 已完成的笔（get_finished_bis 已处理"最后一笔待确认"的实时场景：
@@ -401,7 +393,7 @@ fn assemble_snapshot_profiled(
             input_hash: request.input_hash,
             max_bi_num: max_bi_num as u32,
             min_bi_len: min_bi_len as u32,
-            analysis_window: params.analysis_window,
+            analysis_window,
             generated_at_unix_ms,
             analyzer_version: params.czsc_version.clone(),
         }),
@@ -538,6 +530,17 @@ mod tests {
         for func_id in [401, 402, 403, 404, 405, 406] {
             assert_eq!(channel(&snapshot, func_id).values.len(), 64);
         }
+    }
+
+    #[test]
+    fn meta_records_effective_analysis_window() {
+        let request = sample_request(false);
+        let mut params = test_params(&request);
+        params.analysis_window = 32;
+
+        let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
+
+        assert_eq!(snapshot.meta.as_ref().unwrap().analysis_window, 64);
     }
 
     #[test]

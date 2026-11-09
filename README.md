@@ -62,6 +62,7 @@ flowchart LR
 - ✅ **分型 / 笔**：顶底分型、笔端点与笔方向通道（101/102/201/202）
 - ✅ **段（线段）**：特征序列分型法识别段（203/204）
 - ✅ **中枢**：原生 `czsc-core` 贪心归属 + 前端/后端优化（301~304）
+- ✅ **严格派中枢**：段中枢 + 9 段升级 / 扩张 + 虚中枢（305~308），段级三买三卖（407/408），见 `docs/严格中枢规则.md`
   - 前端：中枢第一笔与行情趋势相反（上升行情首笔下、下跌行情首笔上），行情方向按中枢高低位置判定；
   - 后端：中枢最后一笔与趋势相反（奇数笔结构），末笔与趋势同向的离开笔剔除；
   - 相邻间隔：前一个中枢后端与后一中枢前端至少间隔一笔，**前端优化优先于后端**；
@@ -79,7 +80,7 @@ flowchart LR
   稳态维护（滚动/缩放零重算，历史区域始终有完整结构标注）
 - ✅ **量能背驰**：950 量能输入通道融合真实 VOL；未挂载时自动以振幅代理量兜底
 - ✅ **Windows 全链路**：Named Pipe 服务 + 自动拉起/退出回收（Job Object）+ 冒烟测试
-- ✅ **公式模板**：结构主图模板 `tdx_formula_examples/main_chart_full.tn6`
+- ✅ **公式模板**：结构主图模板 `tdx_formula_examples/main_chart_full.tn6`；严格派中枢主图模板 `main_chart_strict.tn6`
   （分型/笔/中枢/段）+ 买卖点专家系统指示 `tdx_formula_examples/buy_sell_expert.tn6`
   （401~406 → ENTERLONG/EXITLONG 买卖信号，可回测；B/S 箭头由系统绘制，
   类型文字标注见 `buy_sell_mark.tn6`）
@@ -234,7 +235,10 @@ K 线上穿止盈线或下穿止损线即终止该买点的线（不输出文字
 | 302 | `zs_lower` | 中枢下沿 |
 | 303 | `zs_middle` | 中枢中轴 |
 | 304 | `zs_boundary` | 中枢左右界标记（1=左界、2=右界、3=左右界共用） |
+| 305~307 | `zs_strict_upper/lower/middle` | 严格派中枢上/下/中轴（虚中枢取负） |
+| 308 | `zs_strict_boundary` | 严格派中枢边界码：区间内 `level*10`、边界 `level*10+1/2`（负=虚） |
 | 401~406 | `buy1`…`sell3` | 一买/一卖/二买/二卖/三买/三卖 |
+| 407/408 | `buy3_strict`/`sell3_strict` | 段级三买 / 三卖 |
 | 901 | `debug_cache_hit` | 调试：缓存命中（1/0） |
 | 902 | `debug_service_ready` | 调试：服务就绪（恒 1） |
 | 903 | `debug_latency_ms` | 调试：最近一次请求耗时 |
@@ -257,7 +261,7 @@ tdx_czsc/
 │   ├── examples/analyze_csv.rs # 离线 CSV 分析工具（脱离通达信验证算法）
 │   └── tests/                  # 真实数据回归测试（通路/段/中枢/信号/背驰）
 ├── bridge_dll/                 # x64 C++ DLL（通达信加载）+ 冒烟测试 + ini 样例
-├── tdx_formula_examples/       # 通达信公式模板（main_chart_full / atr_tp_sl / atr_sl_day / buy_sell_expert / buy_sell_mark / chan_select）
+├── tdx_formula_examples/       # 通达信公式模板（main_chart_full / main_chart_strict / atr_tp_sl / atr_sl_day / buy_sell_expert / buy_sell_mark / chan_select）
 ├── tests/data/                 # 回归测试真实行情 CSV
 ├── docs/                       # 技术方案 + 通达信 DLL 编程规范
 ├── deploy_to_tdx.bat           # 一键部署：构建服务与 DLL 并拷贝到通达信

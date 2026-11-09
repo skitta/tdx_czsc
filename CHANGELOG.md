@@ -3,6 +3,24 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [未发布] - 2026-11
+
+**严格派中枢（L2）**：段中枢 + 9 段升级 / 扩张 + 虚中枢 + 段级三买三卖。
+
+### 新增
+
+- 协议：`StrictPivotZone`（`level/kind/is_sure/move_count/gg/dd`）、
+  `AnalysisSnapshot.strict_pivots=8`、`PivotKind`、通道 305–308 / 407–408、
+  `SignalKind` 7/8；
+- Rust：新增 `analyzer/strict_pivots.rs`（段中枢、9 段升级、扩张与上限、
+  可见性选择、407/408）；`channels` 新增严格通道；未知 func_id 改为补 0
+  通道，避免新旧版本混用时整请求失败；
+- DLL：注册 Func305–308 / Func407–408 并纳入请求列表；
+- 公式：新增 `tdx_formula_examples/main_chart_strict.tn6`；
+- 文档：新增 `docs/严格中枢规则.md`，更新通道表、模板清单、真机验证清单；
+- 工具：`analyze_csv --compare`（笔中枢 vs 严格中枢数量/中位宽/窄占比，
+  内置阈值断言）。
+
 ## [0.9.0] - 2026-08
 
 **预留清理 + 配置加载**（按用户原则：非用户提出/同意的功能不再预留）。

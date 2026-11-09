@@ -3,6 +3,8 @@
 { 通道：305/306/307 上/下/中 价（虚取负）；308 = level*10（区间内）/ level*10+edge（左右界），负=虚；407/408 段级三买三卖 }
 { 级别：1=段中枢，2=9 段升级或扩张，3=扩张 }
 
+{ 周期输入 951: 必须在首个分析通道前调用, 让 DLL 记录当前图表周期 }
+周期输入:=TDXDLL1(951,HIGH,LOW,PERIOD+0*CLOSE);
 严格上:=TDXDLL1(305,HIGH,LOW,CLOSE);
 严格下:=TDXDLL1(306,HIGH,LOW,CLOSE);
 严格界:=TDXDLL1(308,HIGH,LOW,CLOSE);

@@ -11,6 +11,8 @@
 { 调试开关:=1; }   { 已注释: 调试功能默认关闭 }
 
 { ==== 通道读取 (中间变量, 不画线) ==== }
+{ 周期输入 951: 必须在首个分析通道前调用, 让 DLL 记录当前图表周期 }
+周期输入:=TDXDLL1(951,HIGH,LOW,PERIOD+0*CLOSE);
 顶分:=TDXDLL1(101,HIGH,LOW,CLOSE);
 底分:=TDXDLL1(102,HIGH,LOW,CLOSE);
 笔端:=TDXDLL1(201,HIGH,LOW,CLOSE);

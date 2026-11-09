@@ -1,0 +1,43 @@
+{ 严格派段中枢（L1/L2）主图叠加模板 }
+{ 前提：Bridge DLL 已绑定编号 1；导入后公式属性设为“主图叠加” }
+{ 通道：305/306/307 上/下/中 价（虚取负）；308 = level*10（区间内）/ level*10+edge（左右界），负=虚；407/408 段级三买三卖 }
+{ 级别：1=段中枢，2=9 段升级或扩张，3=扩张 }
+
+严格上:=TDXDLL1(305,HIGH,LOW,CLOSE);
+严格下:=TDXDLL1(306,HIGH,LOW,CLOSE);
+严格界:=TDXDLL1(308,HIGH,LOW,CLOSE);
+买3:=TDXDLL1(407,HIGH,LOW,CLOSE);
+卖3:=TDXDLL1(408,HIGH,LOW,CLOSE);
+
+实:=严格界>0;
+虚:=严格界<0;
+级别:=INTPART(ABS(严格界)/10);
+边界:=ABS(严格界)-级别*10;
+
+{ 实中枢：按级别着色（1 蓝 / 2 洋红 / 3 红），整段价线闭合 }
+L1上:IF(实 AND 级别=1,严格上,DRAWNULL),COLORBLUE;
+L1下:IF(实 AND 级别=1,严格下,DRAWNULL),COLORBLUE;
+L2上:IF(实 AND 级别=2,严格上,DRAWNULL),COLORMAGENTA;
+L2下:IF(实 AND 级别=2,严格下,DRAWNULL),COLORMAGENTA;
+L3上:IF(实 AND 级别=3,严格上,DRAWNULL),COLORRED;
+L3下:IF(实 AND 级别=3,严格下,DRAWNULL),COLORRED;
+
+{ 左右竖线 }
+STICKLINE(实 AND 边界=1 AND 级别=1,ABS(严格下),ABS(严格上),1,0),COLORBLUE;
+STICKLINE(实 AND 边界=2 AND 级别=1,ABS(严格下),ABS(严格上),1,0),COLORBLUE;
+STICKLINE(实 AND 边界=1 AND 级别=2,ABS(严格下),ABS(严格上),1,0),COLORMAGENTA;
+STICKLINE(实 AND 边界=2 AND 级别=2,ABS(严格下),ABS(严格上),1,0),COLORMAGENTA;
+STICKLINE(实 AND 边界=1 AND 级别=3,ABS(严格下),ABS(严格上),1,0),COLORRED;
+STICKLINE(实 AND 边界=2 AND 级别=3,ABS(严格下),ABS(严格上),1,0),COLORRED;
+
+{ 虚中枢：灰色 }
+虚上沿:IF(虚,-严格上,DRAWNULL),COLORGRAY;
+虚下沿:IF(虚,-严格下,DRAWNULL),COLORGRAY;
+STICKLINE(虚 AND 边界=1,ABS(严格下),ABS(严格上),1,0),COLORGRAY;
+STICKLINE(虚 AND 边界=2,ABS(严格下),ABS(严格上),1,0),COLORGRAY;
+
+{ 段级三买/三卖 }
+DRAWICON(买3>0,买3,1);
+DRAWICON(卖3>0,卖3,2);
+DRAWTEXT(买3>0,买3*0.995,'段三买'),COLORRED;
+DRAWTEXT(卖3>0,卖3*1.005,'段三卖'),COLORGREEN;

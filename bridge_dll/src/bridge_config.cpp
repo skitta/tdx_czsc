@@ -97,13 +97,18 @@ bool ParseSize(const std::string& text, std::size_t* out) {
     return true;
 }
 
-const char* EnvValue(const char* name) {
-    static thread_local char buffer[128]{};
-    const DWORD size = GetEnvironmentVariableA(name, buffer, sizeof(buffer));
-    if (size == 0 || size >= sizeof(buffer)) {
-        return nullptr;
+std::string EnvValue(const char* name) {
+    const DWORD size = GetEnvironmentVariableA(name, nullptr, 0);
+    if (size == 0) {
+        return {};
     }
-    return buffer;
+    std::string value(size, '\0');
+    const DWORD copied = GetEnvironmentVariableA(name, value.data(), size);
+    if (copied == 0 || copied >= size) {
+        return {};
+    }
+    value.resize(copied);
+    return value;
 }
 
 /// 对单个配置项应用：INI 值 < 环境变量 < 调用方。
@@ -168,12 +173,12 @@ IniOverrides ParseIniFile(const std::wstring& ini_path) {
     return overrides;
 }
 
-const char* PickEnv(const char* env_name, const std::string& ini_value) {
-    const char* env = EnvValue(env_name);
-    if (env != nullptr && *env != '\0') {
+std::string PickEnv(const char* env_name, const std::string& ini_value) {
+    const std::string env = EnvValue(env_name);
+    if (!env.empty()) {
         return env;
     }
-    return ini_value.empty() ? nullptr : ini_value.c_str();
+    return ini_value;
 }
 
 }  // namespace
@@ -186,50 +191,50 @@ BridgeConfig LoadBridgeConfig() {
     uint32_t u32 = 0;
     std::size_t size = 0;
 
-    if (const char* v = PickEnv("TDX_CZSC_PIPE", ini.pipe_name); v != nullptr) {
+    if (const std::string v = PickEnv("TDX_CZSC_PIPE", ini.pipe_name); !v.empty()) {
         config.pipe_name = Utf8ToW(v);
     }
-    if (const char* v = PickEnv("TDX_CZSC_STARTUP_TIMEOUT_MS", ini.startup_timeout_ms);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_STARTUP_TIMEOUT_MS", ini.startup_timeout_ms);
+        !v.empty() && ParseUint(v, &u32)) {
         config.startup_timeout_ms = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_REQUEST_TIMEOUT_MS", ini.request_timeout_ms);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_REQUEST_TIMEOUT_MS", ini.request_timeout_ms);
+        !v.empty() && ParseUint(v, &u32)) {
         config.request_timeout_ms = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_RETRY_COUNT", ini.connect_retry_count);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_RETRY_COUNT", ini.connect_retry_count);
+        !v.empty() && ParseUint(v, &u32)) {
         config.connect_retry_count = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_RETRY_INTERVAL_MS", ini.connect_retry_interval_ms);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_RETRY_INTERVAL_MS", ini.connect_retry_interval_ms);
+        !v.empty() && ParseUint(v, &u32)) {
         config.connect_retry_interval_ms = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_MAX_BI_NUM", ini.max_bi_num);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_MAX_BI_NUM", ini.max_bi_num);
+        !v.empty() && ParseUint(v, &u32)) {
         config.max_bi_num = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_MIN_BI_LEN", ini.min_bi_len);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_MIN_BI_LEN", ini.min_bi_len);
+        !v.empty() && ParseUint(v, &u32)) {
         config.min_bi_len = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_ANALYSIS_WINDOW", ini.analysis_window);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_ANALYSIS_WINDOW", ini.analysis_window);
+        !v.empty() && ParseUint(v, &u32)) {
         config.analysis_window = u32;
     }
-    if (const char* v = PickEnv("TDX_CZSC_CACHE_CAPACITY", ini.dll_cache_capacity);
-        v != nullptr && ParseSize(v, &size)) {
+    if (const std::string v = PickEnv("TDX_CZSC_CACHE_CAPACITY", ini.dll_cache_capacity);
+        !v.empty() && ParseSize(v, &size)) {
         config.dll_cache_capacity = size;
     }
 
     // 服务可执行文件：默认 DLL 同目录 tdx_czsc_service.exe（与部署脚本拷贝位置一致）
-    if (const char* v = PickEnv("TDX_CZSC_SERVICE_EXE", ini.service_exe); v != nullptr) {
+    if (const std::string v = PickEnv("TDX_CZSC_SERVICE_EXE", ini.service_exe); !v.empty()) {
         config.service_exe = Utf8ToW(v);
     } else {
         config.service_exe = ModuleDirectory() + L"\\tdx_czsc_service.exe";
     }
-    if (const char* v = PickEnv("TDX_CZSC_SERVICE_STARTUP_WAIT_MS", ini.service_startup_wait_ms);
-        v != nullptr && ParseUint(v, &u32)) {
+    if (const std::string v = PickEnv("TDX_CZSC_SERVICE_STARTUP_WAIT_MS", ini.service_startup_wait_ms);
+        !v.empty() && ParseUint(v, &u32)) {
         config.service_startup_wait_ms = u32;
     }
 

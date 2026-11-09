@@ -16,15 +16,14 @@ void HashCombine(std::size_t* seed, const T& value) {
 }  // namespace
 
 bool CacheKey::operator==(const CacheKey& other) const {
-    return func_group == other.func_group && input_hash == other.input_hash &&
-           data_len == other.data_len && freq_hint == other.freq_hint &&
+    return input_hash == other.input_hash && data_len == other.data_len &&
+           freq_hint == other.freq_hint &&
            max_bi_num == other.max_bi_num && min_bi_len == other.min_bi_len &&
            analysis_window == other.analysis_window;
 }
 
 std::size_t CacheKeyHasher::operator()(const CacheKey& key) const {
     std::size_t seed = 0;
-    HashCombine(&seed, key.func_group);
     HashCombine(&seed, key.input_hash);
     HashCombine(&seed, key.data_len);
     HashCombine(&seed, key.freq_hint);

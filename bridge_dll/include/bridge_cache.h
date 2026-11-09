@@ -12,13 +12,13 @@
 namespace tdx_czsc {
 
 struct CacheKey {
-    std::string func_group;
     uint64_t input_hash = 0;
     uint32_t data_len = 0;
     std::string freq_hint;
     uint32_t max_bi_num = 50;
     uint32_t min_bi_len = 6;
     uint32_t analysis_window = 1000;
+    // DLL 恒请求全通道，故通道集合不进键；若未来支持子集请求，再与服务端同步加入。
 
     bool operator==(const CacheKey& other) const;
 };

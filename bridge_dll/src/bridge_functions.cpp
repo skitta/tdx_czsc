@@ -2,8 +2,10 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -21,8 +23,12 @@ namespace {
 // 量能输入通道：公式以 TDXDLL1(950, HIGH, LOW, VOL) 调用，
 // DLL 把第三路（VOL）按"数据段指纹"缓存，供后续 101/401 等分析请求融合。
 constexpr uint32_t kVolumeInputFuncId = 950;
+// 周期输入通道：公式以 TDXDLL1(951, HIGH, LOW, PERIOD+0*CLOSE) 调用，
+// DLL 把第三路（周期码）按"数据段指纹"缓存，供后续请求设置 freq_hint。
+constexpr uint32_t kPeriodInputFuncId = 951;
 // 量能缓存条数上限（超出清除最早插入，FIFO）。
 constexpr size_t kVolumeCacheMaxEntries = 16;
+constexpr size_t kPeriodCacheMaxEntries = 16;
 
 struct BridgeRuntime {
     explicit BridgeRuntime(BridgeConfig cfg)
@@ -38,6 +44,11 @@ struct BridgeRuntime {
     std::unordered_map<uint64_t, std::vector<float>> volume_cache;
     std::deque<uint64_t> volume_cache_order;
 
+    // 周期缓存：段指纹 -> "F30"/"D"/...，由 period_cache_mutex 保护。
+    std::mutex period_cache_mutex;
+    std::unordered_map<uint64_t, std::string> period_cache;
+    std::deque<uint64_t> period_cache_order;
+
     std::atomic_uint64_t request_counter{1};
 };
 
@@ -46,10 +57,11 @@ BridgeRuntime& Runtime() {
     return runtime;
 }
 
-/// 数据段指纹：只依赖 (data_len, 前两路输入 HIGH/LOW)。
+/// 数据段指纹：依赖 (data_len, 全量 HIGH/LOW)。
 /// 公式对同一图表的多个 TDXDLLn 调用传入相同的 HIGH/LOW 序列，
 /// 因此 950 调用与分析请求（101/401 等）的指纹一致，VOL 才能被互相配对；
-/// 第三路（CLOSE 或 VOL）不参与指纹。
+/// 第三路（CLOSE 或 VOL）不参与指纹。必须遍历全量数据：只采样首尾会让
+/// 历史中间 K 线的修正漏过缓存键。
 uint64_t ComputeSegmentKey(int data_len, float* in_high, float* in_low) {
     uint64_t hash = 1469598103934665603ULL;
     const auto mix = [&hash](float value) {
@@ -63,8 +75,7 @@ uint64_t ComputeSegmentKey(int data_len, float* in_high, float* in_low) {
     }
 
     mix(static_cast<float>(data_len));
-    const int sample_count = data_len < 32 ? data_len : 32;
-    for (int i = 0; i < sample_count; ++i) {
+    for (int i = 0; i < data_len; ++i) {
         mix(in_high[i]);
         mix(in_low[i]);
     }
@@ -89,11 +100,71 @@ void CacheVolume(uint64_t segment_key, std::vector<float> vol) {
     }
 }
 
-/// 查询某数据段的 VOL 序列；未命中返回 nullptr。
-const std::vector<float>* LookupVolume(uint64_t segment_key) {
+/// 查询某数据段的 VOL 序列；未命中返回 nullopt。
+/// 按值返回，避免调用方在锁外持有 unordered_map 内部元素的悬空指针。
+std::optional<std::vector<float>> LookupVolume(uint64_t segment_key) {
     std::lock_guard<std::mutex> lock(Runtime().volume_cache_mutex);
     const auto it = Runtime().volume_cache.find(segment_key);
-    return it == Runtime().volume_cache.end() ? nullptr : &it->second;
+    if (it == Runtime().volume_cache.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+/// 通达信 PERIOD 码 -> 服务端可解析的 freq_hint。
+///
+/// 常见映射：0=1分钟、1=5分钟、2=15分钟、3=30分钟、4=60分钟、
+/// 5=日线、6=周线、7=月线。不同通达信版本的 PERIOD 编码可能不同，
+/// 如你的版本不符，改这里即可（公式侧仍传原始 PERIOD，不需要改模板）。
+std::string PeriodCodeToFreq(int code) {
+    switch (code) {
+        case 0:
+            return "F1";
+        case 1:
+            return "F5";
+        case 2:
+            return "F15";
+        case 3:
+            return "F30";
+        case 4:
+            return "F60";
+        case 5:
+            return "D";
+        case 6:
+            return "W";
+        case 7:
+            return "M";
+        default:
+            return {};
+    }
+}
+
+/// 缓存 951 通道传入的周期（按数据段指纹键控）。
+void CachePeriod(uint64_t segment_key, std::string freq) {
+    std::lock_guard<std::mutex> lock(Runtime().period_cache_mutex);
+    auto& cache = Runtime().period_cache;
+    auto& order = Runtime().period_cache_order;
+    if (cache.find(segment_key) != cache.end()) {
+        cache[segment_key] = std::move(freq);
+        return;
+    }
+    cache.emplace(segment_key, std::move(freq));
+    order.push_back(segment_key);
+    while (cache.size() > kPeriodCacheMaxEntries) {
+        const uint64_t oldest = order.front();
+        order.pop_front();
+        cache.erase(oldest);
+    }
+}
+
+/// 查询某数据段的周期；未命中返回 nullopt。
+std::optional<std::string> LookupPeriod(uint64_t segment_key) {
+    std::lock_guard<std::mutex> lock(Runtime().period_cache_mutex);
+    const auto it = Runtime().period_cache.find(segment_key);
+    if (it == Runtime().period_cache.end()) {
+        return std::nullopt;
+    }
+    return it->second;
 }
 
 uint64_t ComputeInputHash(int data_len,
@@ -113,23 +184,17 @@ uint64_t ComputeInputHash(int data_len,
         return hash;
     }
 
-    const int sample_count = data_len < 32 ? data_len : 32;
-    for (int i = 0; i < sample_count; ++i) {
+    for (int i = 0; i < data_len; ++i) {
         mix(in_high[i]);
         mix(in_low[i]);
         mix(in_close[i]);
     }
     // 量能已融合时纳入哈希：带/不带量能的请求在服务端缓存中互不污染
     if (in_vol != nullptr && vol_len > 0) {
-        const int vol_sample_count = vol_len < 32 ? vol_len : 32;
-        for (int i = 0; i < vol_sample_count; ++i) {
+        for (int i = 0; i < vol_len; ++i) {
             mix(in_vol[i]);
         }
     }
-    // 与原实现一致：末根K线再次参与哈希
-    mix(in_high[data_len - 1]);
-    mix(in_low[data_len - 1]);
-    mix(in_close[data_len - 1]);
     return hash;
 }
 
@@ -149,8 +214,13 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
     // 使带/不带量能的请求在 DLL 与服务端缓存中互不污染。
     if (data_len > 0) {
         const uint64_t segment_key = ComputeSegmentKey(data_len, in_high, in_low);
-        if (const std::vector<float>* cached_vol = LookupVolume(segment_key);
-            cached_vol != nullptr && cached_vol->size() == static_cast<size_t>(data_len)) {
+        if (const std::optional<std::string> cached_freq = LookupPeriod(segment_key);
+            cached_freq.has_value()) {
+            request.freq_hint = *cached_freq;
+        }
+        if (const std::optional<std::vector<float>> cached_vol = LookupVolume(segment_key);
+            cached_vol.has_value() &&
+            cached_vol->size() == static_cast<size_t>(data_len)) {
             request.vol = *cached_vol;
             request.input_hash = ComputeInputHash(data_len, in_high, in_low, in_close,
                                                   request.vol.data(),
@@ -191,7 +261,8 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
 
 CacheKey BuildCacheKey(const AnalyzeRequestCpp& request) {
     CacheKey key;
-    key.func_group = request.func_group;
+    // func_group 不改变通道内容（请求恒为全通道），不参与缓存键，避免
+    // 结构/信号公式对同一份数据重复做全量分析。
     key.input_hash = request.input_hash;
     key.data_len = request.data_len;
     key.freq_hint = request.freq_hint;
@@ -245,25 +316,76 @@ DECLARE_FUNC_WRAPPER(903)
 /// （公式传 VOL 序列）按"数据段指纹"缓存，供后续分析请求融合；
 /// 输出原样回填第三路（公式层可作量能线显示或直接忽略）。
 void Func950(int data_len, float* out_values, float* in_high, float* in_low, float* in_close) {
-    if (out_values == nullptr || data_len <= 0) {
-        LogWarn("Func950 received invalid output buffer or data_len <= 0");
-        return;
-    }
-    if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
-        LogWarn("Func950 received null input series pointer");
-        FillZeros(data_len, out_values);
-        return;
-    }
+    try {
+        if (out_values == nullptr || data_len <= 0) {
+            LogWarn("Func950 received invalid output buffer or data_len <= 0");
+            return;
+        }
+        if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
+            LogWarn("Func950 received null input series pointer");
+            FillZeros(data_len, out_values);
+            return;
+        }
 
-    std::vector<float> vol(in_close, in_close + data_len);
-    const uint64_t segment_key = ComputeSegmentKey(data_len, in_high, in_low);
-    CacheVolume(segment_key, vol);
-    std::copy(in_close, in_close + data_len, out_values);
+        std::vector<float> vol(in_close, in_close + data_len);
+        const uint64_t segment_key = ComputeSegmentKey(data_len, in_high, in_low);
+        CacheVolume(segment_key, vol);
+        std::copy(in_close, in_close + data_len, out_values);
 
-    LogInfo("Func950 cached volume data_len=" + std::to_string(data_len) +
-            " seg_key=" + std::to_string(segment_key) +
-            " first_vol=" + std::to_string(in_close[0]) +
-            " last_vol=" + std::to_string(in_close[data_len - 1]));
+        LogInfo("Func950 cached volume data_len=" + std::to_string(data_len) +
+                " seg_key=" + std::to_string(segment_key) +
+                " first_vol=" + std::to_string(in_close[0]) +
+                " last_vol=" + std::to_string(in_close[data_len - 1]));
+    } catch (...) {
+        if (out_values != nullptr && data_len > 0) {
+            FillZeros(data_len, out_values);
+        }
+        try {
+            LogError("Func950 caught unexpected exception");
+        } catch (...) {
+        }
+    }
+}
+
+/// 周期输入通道（func_id=951）：公式以
+/// `TDXDLL1(951, HIGH, LOW, PERIOD+0*CLOSE)` 传入当前图表周期码。
+/// 不发起分析请求，只按数据段缓存周期；后续分析请求据此设置 freq_hint。
+/// 输出原样回填第三路，便于公式侧调试（可忽略）。
+void Func951(int data_len, float* out_values, float* in_high, float* in_low, float* in_close) {
+    try {
+        if (out_values == nullptr || data_len <= 0) {
+            LogWarn("Func951 received invalid output buffer or data_len <= 0");
+            return;
+        }
+        if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
+            LogWarn("Func951 received null input series pointer");
+            FillZeros(data_len, out_values);
+            return;
+        }
+
+        const int period_code = static_cast<int>(std::lround(in_close[0]));
+        const std::string freq = PeriodCodeToFreq(period_code);
+        const uint64_t segment_key = ComputeSegmentKey(data_len, in_high, in_low);
+        if (freq.empty()) {
+            LogWarn("Func951 unsupported PERIOD code=" + std::to_string(period_code));
+        } else {
+            CachePeriod(segment_key, freq);
+        }
+        std::copy(in_close, in_close + data_len, out_values);
+
+        LogInfo("Func951 cached period data_len=" + std::to_string(data_len) +
+                " seg_key=" + std::to_string(segment_key) +
+                " period_code=" + std::to_string(period_code) +
+                " freq=" + (freq.empty() ? "fallback" : freq));
+    } catch (...) {
+        if (out_values != nullptr && data_len > 0) {
+            FillZeros(data_len, out_values);
+        }
+        try {
+            LogError("Func951 caught unexpected exception");
+        } catch (...) {
+        }
+    }
 }
 
 PluginTCalcFuncInfo g_calc_funcs[] = {
@@ -292,7 +414,8 @@ PluginTCalcFuncInfo g_calc_funcs[] = {
     {901, &Func901},
     {902, &Func902},
     {903, &Func903},
-    {950, &Func950},
+    {kVolumeInputFuncId, &Func950},
+    {kPeriodInputFuncId, &Func951},
     {0, nullptr},
 };
 
@@ -304,42 +427,73 @@ void HandleFunc(uint32_t func_id,
                 float* in_high,
                 float* in_low,
                 float* in_close) {
-    if (out_values == nullptr || data_len <= 0) {
-        LogWarn("HandleFunc received invalid output buffer or data_len <= 0");
-        return;
+    try {
+        if (out_values == nullptr || data_len <= 0) {
+            LogWarn("HandleFunc received invalid output buffer or data_len <= 0");
+            return;
+        }
+
+        FillZeros(data_len, out_values);
+
+        if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
+            LogWarn("HandleFunc received null input series pointer");
+            return;
+        }
+
+        const AnalyzeRequestCpp request = BuildRequest(func_id, data_len, in_high, in_low, in_close);
+        const CacheKey cache_key = BuildCacheKey(request);
+
+        AnalysisSnapshotCpp snapshot;
+        if (Runtime().cache.TryGet(cache_key, &snapshot)) {
+            snapshot.service_cache_hit = true;
+            FillFromSnapshot(snapshot, func_id, data_len, out_values);
+            return;
+        }
+
+        std::string error;
+        if (Runtime().client.Analyze(request, &snapshot, &error)) {
+            Runtime().cache.Put(cache_key, snapshot);
+            FillFromSnapshot(snapshot, func_id, data_len, out_values);
+            return;
+        }
+
+        LogError("BridgeIpcClient::Analyze failed for func_id=" + std::to_string(func_id) +
+                 " data_len=" + std::to_string(data_len) + " error=" + error);
+        FillDebugFallback(func_id, data_len, out_values);
+    } catch (...) {
+        if (out_values != nullptr && data_len > 0) {
+            FillZeros(data_len, out_values);
+        }
+        try {
+            LogError("HandleFunc caught unexpected exception for func_id=" +
+                     std::to_string(func_id));
+        } catch (...) {
+        }
     }
-
-    FillZeros(data_len, out_values);
-
-    if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
-        LogWarn("HandleFunc received null input series pointer");
-        return;
-    }
-
-    const AnalyzeRequestCpp request = BuildRequest(func_id, data_len, in_high, in_low, in_close);
-    const CacheKey cache_key = BuildCacheKey(request);
-
-    AnalysisSnapshotCpp snapshot;
-    if (Runtime().cache.TryGet(cache_key, &snapshot)) {
-        snapshot.service_cache_hit = true;
-        FillFromSnapshot(snapshot, func_id, data_len, out_values);
-        return;
-    }
-
-    std::string error;
-    if (Runtime().client.Analyze(request, &snapshot, &error)) {
-        Runtime().cache.Put(cache_key, snapshot);
-        FillFromSnapshot(snapshot, func_id, data_len, out_values);
-        return;
-    }
-
-    LogError("BridgeIpcClient::Analyze failed for func_id=" + std::to_string(func_id) +
-             " data_len=" + std::to_string(data_len) + " error=" + error);
-    FillDebugFallback(func_id, data_len, out_values);
 }
 
 PluginTCalcFuncInfo* GetFunctionRegistry() {
     return g_calc_funcs;
 }
+
+#ifdef TDX_CZSC_TESTING
+uint64_t ComputeInputHashForTest(int data_len, float* in_high, float* in_low, float* in_close) {
+    return ComputeInputHash(data_len, in_high, in_low, in_close);
+}
+
+uint64_t ComputeSegmentKeyForTest(int data_len, float* in_high, float* in_low) {
+    return ComputeSegmentKey(data_len, in_high, in_low);
+}
+
+std::string PeriodCodeToFreqForTest(int code) {
+    return PeriodCodeToFreq(code);
+}
+
+std::string CachedFreqHintForTest(int data_len, float* in_high, float* in_low) {
+    const std::optional<std::string> freq =
+        LookupPeriod(ComputeSegmentKey(data_len, in_high, in_low));
+    return freq.value_or("");
+}
+#endif
 
 }  // namespace tdx_czsc

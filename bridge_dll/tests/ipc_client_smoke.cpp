@@ -26,10 +26,6 @@ std::string GetEnvOrDefault(const char* name, const std::string& fallback) {
     return fallback;
 }
 
-std::wstring Utf8ToWide(const std::string& input) {
-    return std::wstring(input.begin(), input.end());
-}
-
 std::string WideToUtf8(const std::wstring& input) {
     if (input.empty()) {
         return {};
@@ -96,6 +92,74 @@ int main() {
     std::cout << "  analysis_window      : " << config.analysis_window << '\n';
     std::cout << "  dll_cache_capacity   : " << config.dll_cache_capacity << '\n';
     std::cout << '\n';
+
+    // ==== 指纹/周期映射自检 ====
+    // 只改中间 K 线、保持前 32 根和末根不变，指纹必须变化。
+    {
+        constexpr std::size_t kFingerprintLen = 64;
+        std::vector<float> high_a(kFingerprintLen);
+        std::vector<float> low_a(kFingerprintLen);
+        std::vector<float> close_a(kFingerprintLen);
+        for (std::size_t i = 0; i < kFingerprintLen; ++i) {
+            const float base = 10.0f + static_cast<float>(i % 7);
+            high_a[i] = base + 1.0f;
+            low_a[i] = base - 1.0f;
+            close_a[i] = base;
+        }
+        std::vector<float> high_b = high_a;
+        std::vector<float> low_b = low_a;
+        std::vector<float> close_b = close_a;
+        high_b[40] += 5.0f;
+        low_b[40] += 5.0f;
+        close_b[40] += 5.0f;
+
+        const bool hash_differs =
+            tdx_czsc::ComputeInputHashForTest(
+                static_cast<int>(kFingerprintLen), high_a.data(), low_a.data(), close_a.data()) !=
+            tdx_czsc::ComputeInputHashForTest(
+                static_cast<int>(kFingerprintLen), high_b.data(), low_b.data(), close_b.data());
+        const bool segment_differs =
+            tdx_czsc::ComputeSegmentKeyForTest(
+                static_cast<int>(kFingerprintLen), high_a.data(), low_a.data()) !=
+            tdx_czsc::ComputeSegmentKeyForTest(
+                static_cast<int>(kFingerprintLen), high_b.data(), low_b.data());
+        const bool period_mapping_ok =
+            tdx_czsc::PeriodCodeToFreqForTest(3) == "F30" &&
+            tdx_czsc::PeriodCodeToFreqForTest(5) == "D" &&
+            tdx_czsc::PeriodCodeToFreqForTest(99).empty();
+        std::cout << "  fingerprint_mid_bar : " << (hash_differs && segment_differs ? "ok" : "FAIL")
+                  << '\n';
+        std::cout << "  period_mapping      : " << (period_mapping_ok ? "ok" : "FAIL") << '\n';
+        if (!hash_differs || !segment_differs || !period_mapping_ok) {
+            std::cerr << "fingerprint/period self-check failed\n";
+            return 1;
+        }
+
+        PluginTCalcFuncInfo* func_951 = nullptr;
+        for (PluginTCalcFuncInfo* p = tdx_czsc::GetFunctionRegistry();
+             p != nullptr && p->pCallFunc != nullptr; ++p) {
+            if (p->nFuncMark == 951) {
+                func_951 = p;
+                break;
+            }
+        }
+        std::vector<float> period_out(kFingerprintLen, 0.0f);
+        std::vector<float> period_code(kFingerprintLen, 5.0f);
+        if (func_951 == nullptr) {
+            std::cerr << "func_id=951 not registered\n";
+            return 1;
+        }
+        func_951->pCallFunc(static_cast<int>(kFingerprintLen), period_out.data(),
+                            high_a.data(), low_a.data(), period_code.data());
+        const bool period_cache_ok =
+            tdx_czsc::CachedFreqHintForTest(static_cast<int>(kFingerprintLen),
+                                            high_a.data(), low_a.data()) == "D";
+        std::cout << "  period_cache_951    : " << (period_cache_ok ? "ok" : "FAIL") << '\n';
+        if (!period_cache_ok) {
+            std::cerr << "func_id=951 did not cache the current period\n";
+            return 1;
+        }
+    }
 
     const std::string pipe_name_utf8 = WideToUtf8(config.pipe_name);
     const std::string freq_hint = GetEnvOrDefault("TDX_CZSC_FREQ", "F30");

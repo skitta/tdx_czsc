@@ -91,7 +91,7 @@ target_include_directories(tdx_czsc_ipc_smoke_test
 )
 
 target_compile_features(tdx_czsc_ipc_smoke_test PRIVATE cxx_std_20)
-target_compile_definitions(tdx_czsc_ipc_smoke_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(tdx_czsc_ipc_smoke_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN TDX_CZSC_TESTING)
 
 if(MSVC)
     target_compile_options(tdx_czsc_ipc_smoke_test PRIVATE /W4 /EHsc /utf-8)

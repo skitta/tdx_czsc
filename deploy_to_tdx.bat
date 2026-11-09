@@ -5,6 +5,11 @@ set "DEST=%~1"
 if "%DEST%"=="" set "DEST=D:\new_tdx64"
 if not exist "%DEST%\T0002\dlls\" echo [ERR] not found: %DEST% & exit /b 1
 
+rem 系统 %TEMP% 可能权限受限（prost-build 报 PermissionDenied），构建临时目录改到 workspace 内。
+set "TEMP=%~dp0.build-tmp"
+set "TMP=%TEMP%"
+if not exist "%TEMP%" mkdir "%TEMP%"
+
 rem 1) build Rust service (release)
 cargo build --release --manifest-path "%~dp0rust_service\Cargo.toml"
 if errorlevel 1 goto :fail

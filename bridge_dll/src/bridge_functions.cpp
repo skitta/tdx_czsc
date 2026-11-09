@@ -140,7 +140,7 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
                                float* in_close) {
     AnalyzeRequestCpp request;
     request.request_id = Runtime().request_counter.fetch_add(1, std::memory_order_relaxed);
-    request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903};
+    request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 305, 306, 307, 308, 401, 402, 403, 404, 405, 406, 407, 408, 901, 902, 903};
     request.data_len = data_len > 0 ? static_cast<uint32_t>(data_len) : 0;
     request.input_hash = ComputeInputHash(data_len, in_high, in_low, in_close);
 
@@ -225,12 +225,18 @@ DECLARE_FUNC_WRAPPER(301)
 DECLARE_FUNC_WRAPPER(302)
 DECLARE_FUNC_WRAPPER(303)
 DECLARE_FUNC_WRAPPER(304)
+DECLARE_FUNC_WRAPPER(305)
+DECLARE_FUNC_WRAPPER(306)
+DECLARE_FUNC_WRAPPER(307)
+DECLARE_FUNC_WRAPPER(308)
 DECLARE_FUNC_WRAPPER(401)
 DECLARE_FUNC_WRAPPER(402)
 DECLARE_FUNC_WRAPPER(403)
 DECLARE_FUNC_WRAPPER(404)
 DECLARE_FUNC_WRAPPER(405)
 DECLARE_FUNC_WRAPPER(406)
+DECLARE_FUNC_WRAPPER(407)
+DECLARE_FUNC_WRAPPER(408)
 DECLARE_FUNC_WRAPPER(901)
 DECLARE_FUNC_WRAPPER(902)
 DECLARE_FUNC_WRAPPER(903)
@@ -271,12 +277,18 @@ PluginTCalcFuncInfo g_calc_funcs[] = {
     {302, &Func302},
     {303, &Func303},
     {304, &Func304},
+    {305, &Func305},
+    {306, &Func306},
+    {307, &Func307},
+    {308, &Func308},
     {401, &Func401},
     {402, &Func402},
     {403, &Func403},
     {404, &Func404},
     {405, &Func405},
     {406, &Func406},
+    {407, &Func407},
+    {408, &Func408},
     {901, &Func901},
     {902, &Func902},
     {903, &Func903},

@@ -103,7 +103,7 @@ int main() {
     tdx_czsc::AnalyzeRequestCpp request;
     request.request_id = 1;
     request.func_group = "single_level_structure";
-    request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903};
+    request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 305, 306, 307, 308, 401, 402, 403, 404, 405, 406, 407, 408, 901, 902, 903};
     request.freq_hint = freq_hint;
     request.data_len = static_cast<std::uint32_t>(kLen);
     request.input_hash = 0x1122334455667788ULL;
@@ -220,6 +220,10 @@ int main() {
     PrintChannelPreview(snapshot.channels, 303);
     // 304 中枢边界: 左界=1 右界=2, 全量显示便于确认链路
     PrintChannelPreview(snapshot.channels, 304, 64);
+    PrintChannelPreview(snapshot.channels, 305, 64);
+    PrintChannelPreview(snapshot.channels, 306, 64);
+    PrintChannelPreview(snapshot.channels, 307, 64);
+    PrintChannelPreview(snapshot.channels, 308, 64);
     // 买卖点信号可能出现在窗口后半段，401~406 显示全量值便于确认。
     PrintChannelPreview(snapshot.channels, 401, 64);
     PrintChannelPreview(snapshot.channels, 402, 64);
@@ -227,6 +231,8 @@ int main() {
     PrintChannelPreview(snapshot.channels, 404, 64);
     PrintChannelPreview(snapshot.channels, 405, 64);
     PrintChannelPreview(snapshot.channels, 406, 64);
+    PrintChannelPreview(snapshot.channels, 407, 64);
+    PrintChannelPreview(snapshot.channels, 408, 64);
     PrintChannelPreview(snapshot.channels, 901);
     PrintChannelPreview(snapshot.channels, 902);
     PrintChannelPreview(snapshot.channels, 903);

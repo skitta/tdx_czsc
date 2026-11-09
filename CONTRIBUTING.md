@@ -129,11 +129,11 @@
 ### 通达信公式
 优先至少验证：
 
-- `debug_ready.tn6`
-- `debug_latency.tn6`
-- `fx_marks.tn6`
-- `bi_points.tn6`
-- `zs_band.tn6`
+- `main_chart_full.tn6`
+- `main_chart_strict.tn6`
+- `buy_sell_expert.tn6`
+- `buy_sell_mark.tn6`
+- `atr_tp_sl.tn6`
 
 ---
 
@@ -191,5 +191,5 @@
 1. 在 Windows x64 上真实跑通 `rust_service`
 2. 在 Windows x64 上编译通过 `bridge_dll`
 3. 跑通 `tdx_czsc_ipc_smoke_test.exe`
-4. 验证 `debug_ready.tn6` / `fx_marks.tn6` / `zs_band.tn6`
+4. 验证 `main_chart_full.tn6` / `main_chart_strict.tn6` / `atr_tp_sl.tn6`
 5. 补充 Windows 联调中的真实错误样本与修复记录

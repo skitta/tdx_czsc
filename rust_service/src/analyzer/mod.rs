@@ -19,6 +19,7 @@ mod pivots;
 mod rawbars;
 mod segs;
 mod signals;
+mod strict_pivots;
 
 #[cfg(test)]
 mod fixtures;
@@ -26,6 +27,7 @@ mod fixtures;
 // 对外 API 保持原路径（`analyzer::xxx`），内部实现已按模块拆分。
 pub(crate) use channels::SUPPORTED_FUNC_IDS;
 pub use channels::build_channel;
+use channels::{build_strict_channel, zero_channel};
 pub use error::AnalysisError;
 pub(crate) use incremental::{AcceptOutcome, IncrementalCache, IncrementalKey, IncrementalState};
 pub use pivots::build_pivots;
@@ -36,6 +38,9 @@ pub(crate) use signals::evolve_bars_profiled;
 pub use signals::{
     BuySellPoint, MaSeriesCache, compute_buy_sell_points, second_bs_fast, third_bs_fast,
 };
+pub use strict_pivots::{
+    StrictPivot, StrictPivotSet, build_strict_pivots, build_strict_signals, select_visible,
+};
 
 use czsc_core::analyze::CZSC;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -43,7 +48,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::AppConfig;
 use crate::proto::analysis::{
     AnalysisSnapshot, AnalyzeRequest, FractalPoint, PivotZone, SignalPoint, SnapshotMeta,
-    StrokeSegment,
+    StrictPivotZone, StrokeSegment,
 };
 
 use objects::map_segment;
@@ -124,6 +129,8 @@ pub struct SnapshotProfile {
     pub evolve_observe: std::time::Duration,
     /// 中枢 + 段 + 三买/三卖严格化（assemble 前段）
     pub pivots_segs: std::time::Duration,
+    /// 严格派段中枢构建（305–308 / include_objects）
+    pub strict_pivots: std::time::Duration,
     /// 通道填充（requested_func_ids → build_channel）
     pub channels: std::time::Duration,
     /// 对象映射（include_objects 时的分型/笔/中枢/段/信号）
@@ -285,19 +292,48 @@ fn assemble_snapshot_profiled(
         p.pivots_segs += t0.elapsed();
     }
 
+    let include_objects = options.map(|x| x.include_objects).unwrap_or(false);
+    let wants_strict = requested_func_ids(request)
+        .iter()
+        .any(|id| (305..=308).contains(id) || (407..=408).contains(id));
+    let t_strict = std::time::Instant::now();
+    // 仅在需要时构建严格中枢（DLL 恒请求全量，故 DLL 路径默认都会构建）。
+    let strict = if wants_strict || include_objects {
+        build_strict_pivots(&finished_bis, &segs)
+    } else {
+        StrictPivotSet::default()
+    };
+    // 407/408 只在被请求或需要对象时计算；305–308 只需要可见中枢集合。
+    let strict_signals = if wants_strict || include_objects {
+        build_strict_signals(&strict)
+    } else {
+        Vec::new()
+    };
+    let visible = select_visible(&strict.pivots, data_len);
+    if let Some(p) = profile.as_mut() {
+        p.strict_pivots += t_strict.elapsed();
+    }
+
     let t1 = std::time::Instant::now();
     let channels = requested_func_ids(request)
         .into_iter()
         .map(|func_id| {
-            build_channel(
-                func_id,
-                data_len,
-                &fractals,
-                &finished_bis,
-                &pivots,
-                &segs,
-                &buy_sell_points,
-            )
+            if (305..=308).contains(&func_id) || (407..=408).contains(&func_id) {
+                build_strict_channel(func_id, data_len, &visible, &strict_signals)
+            } else if SUPPORTED_FUNC_IDS.contains(&func_id) {
+                build_channel(
+                    func_id,
+                    data_len,
+                    &fractals,
+                    &finished_bis,
+                    &pivots,
+                    &segs,
+                    &buy_sell_points,
+                )
+            } else {
+                // 未知 func_id（新旧版本混用）：补 0 通道，避免整请求失败导致整图空白。
+                Ok(zero_channel(func_id, data_len))
+            }
         })
         .collect::<Result<Vec<_>, AnalysisError>>()?;
     if let Some(p) = profile.as_mut() {
@@ -309,44 +345,51 @@ fn assemble_snapshot_profiled(
         .map_err(|e| AnalysisError::invalid_request(e.to_string()))?
         .as_millis() as u64;
 
-    let include_objects = options.map(|x| x.include_objects).unwrap_or(false);
     let t2 = std::time::Instant::now();
-    let (fractals_obj, strokes_obj, pivots_obj, signals_obj, segments_obj) = if include_objects {
-        (
-            fractals
-                .iter()
-                .filter_map(|fx| FractalPoint::try_from(fx).ok())
-                .collect::<Vec<_>>(),
-            finished_bis
-                .iter()
-                .filter_map(|bi| StrokeSegment::try_from(bi).ok())
-                .collect::<Vec<_>>(),
-            pivots
-                .iter()
-                .filter_map(|zs| PivotZone::try_from(zs).ok())
-                .collect::<Vec<_>>(),
-            buy_sell_points
-                .iter()
-                .map(|p| SignalPoint {
-                    index: p.index as u32,
-                    kind: p.kind as i32,
-                    price: p.price,
-                    label: p.label.clone(),
-                })
-                .collect::<Vec<_>>(),
-            segs.iter()
-                .filter_map(|s| map_segment(s, &finished_bis))
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        (
-            Vec::<FractalPoint>::new(),
-            Vec::<StrokeSegment>::new(),
-            Vec::<PivotZone>::new(),
-            Vec::<SignalPoint>::new(),
-            Vec::new(),
-        )
-    };
+    let (fractals_obj, strokes_obj, pivots_obj, signals_obj, segments_obj, strict_pivots_obj) =
+        if include_objects {
+            (
+                fractals
+                    .iter()
+                    .filter_map(|fx| FractalPoint::try_from(fx).ok())
+                    .collect::<Vec<_>>(),
+                finished_bis
+                    .iter()
+                    .filter_map(|bi| StrokeSegment::try_from(bi).ok())
+                    .collect::<Vec<_>>(),
+                pivots
+                    .iter()
+                    .filter_map(|zs| PivotZone::try_from(zs).ok())
+                    .collect::<Vec<_>>(),
+                buy_sell_points
+                    .iter()
+                    .chain(strict_signals.iter())
+                    .map(|p| SignalPoint {
+                        index: p.index as u32,
+                        kind: p.kind as i32,
+                        price: p.price,
+                        label: p.label.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+                segs.iter()
+                    .filter_map(|s| map_segment(s, &finished_bis))
+                    .collect::<Vec<_>>(),
+                strict
+                    .pivots
+                    .iter()
+                    .filter_map(|p| StrictPivotZone::try_from(p).ok())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            (
+                Vec::<FractalPoint>::new(),
+                Vec::<StrokeSegment>::new(),
+                Vec::<PivotZone>::new(),
+                Vec::<SignalPoint>::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
     if let Some(p) = profile.as_mut() {
         p.objects += t2.elapsed();
     }
@@ -368,6 +411,7 @@ fn assemble_snapshot_profiled(
         pivots: pivots_obj,
         signals: signals_obj,
         segments: segments_obj,
+        strict_pivots: strict_pivots_obj,
     })
 }
 
@@ -573,6 +617,17 @@ mod tests {
             "top fractal should stay at idx2, got {}",
             fx_top.values[2]
         );
+    }
+
+    #[test]
+    fn unknown_func_id_yields_zero_channel() {
+        let mut request = sample_request(false);
+        request.requested_func_ids = vec![101, 999];
+        let params = test_params(&request);
+        let snapshot = build_snapshot(&request, &params).expect("snapshot");
+        let zero = channel(&snapshot, 999);
+        assert!(zero.values.iter().all(|v| *v == 0.0));
+        assert!(nonzero_count(&channel(&snapshot, 101).values) > 0);
     }
 
     /// 调试例程：分型/笔端点/笔向对照打印（配合 --nocapture 人工核对）。

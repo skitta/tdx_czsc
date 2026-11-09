@@ -26,9 +26,10 @@ use common::{analyze_request, analyze_request_ex, config_for, load_series};
 
 const CSV: &str = "../tests/data/002340_day.csv";
 const MIN_BI_LEN: u32 = 6;
-/// 覆盖全部结构与信号通道。
+/// 覆盖全部结构与信号通道（含严格派中枢 305–308 与段级买卖点 407/408）。
 const REQ_FUNC_IDS: &[u32] = &[
-    101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406,
+    101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 305, 306, 307, 308, 401, 402, 403, 404, 405,
+    406, 407, 408,
 ];
 
 fn snapshot_channels(snapshot: &AnalysisSnapshot) -> Vec<(u32, Vec<f32>)> {

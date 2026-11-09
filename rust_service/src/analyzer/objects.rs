@@ -19,9 +19,10 @@ use czsc_core::objects::mark::Mark;
 use czsc_core::objects::zs::ZS;
 
 use crate::analyzer::segs::Segment;
+use crate::analyzer::strict_pivots::StrictPivot;
 use crate::proto::analysis::{
     Direction as ProtoDirection, FractalMark, FractalPoint, PivotZone, Segment as ProtoSegment,
-    StrokeSegment,
+    StrictPivotZone, StrokeSegment,
 };
 
 /// 对象无法对齐到原始 K 线下标（`fx_mid_index` 返回 None）。
@@ -119,6 +120,26 @@ impl TryFrom<&ZS> for PivotZone {
             upper: zs.zg,
             lower: zs.zd,
             middle: zs.zz,
+        })
+    }
+}
+
+impl TryFrom<&StrictPivot> for StrictPivotZone {
+    type Error = AlignError;
+
+    fn try_from(p: &StrictPivot) -> Result<Self, Self::Error> {
+        Ok(StrictPivotZone {
+            start_index: p.start_index as u32,
+            end_index: p.end_index as u32,
+            upper: p.upper,
+            lower: p.lower,
+            middle: p.middle,
+            gg: p.gg,
+            dd: p.dd,
+            level: p.level,
+            is_sure: p.is_sure,
+            move_count: p.move_count as u32,
+            kind: p.kind.as_i32(),
         })
     }
 }

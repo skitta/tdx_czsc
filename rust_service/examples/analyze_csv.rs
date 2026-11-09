@@ -3,7 +3,7 @@
 //! 用法：
 //! ```text
 //! cargo run --example analyze_csv -- <csv路径> [min_bi_len] [analysis_window]
-//! cargo run --example analyze_csv -- tests/data/002340_30m.csv 3
+//! cargo run --example analyze_csv -- --compare [min_bi_len] [window] <csv路径>...
 //! cargo run --example analyze_csv -- ../tests/data/999999_day.csv 5 0
 //! ```
 //! 窗口参数：0 = 全量（默认），正数 = 取尾部 N 根。
@@ -29,22 +29,36 @@ const CHANNEL_NAMES: &[(u32, &str)] = &[
     (102, "fx_bottom"),
     (201, "bi_points"),
     (202, "bi_direction"),
+    (203, "seg_points"),
+    (204, "seg_direction"),
     (301, "zs_upper"),
     (302, "zs_lower"),
     (303, "zs_middle"),
     (304, "zs_boundary"),
+    (305, "zs_strict_upper"),
+    (306, "zs_strict_lower"),
+    (307, "zs_strict_middle"),
+    (308, "zs_strict_boundary"),
     (401, "buy1"),
     (402, "sell1"),
     (403, "buy2"),
     (404, "sell2"),
     (405, "buy3"),
     (406, "sell3"),
+    (407, "buy3_strict"),
+    (408, "sell3_strict"),
 ];
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        bail!("用法: analyze_csv <csv路径> [min_bi_len] [analysis_window]");
+        bail!(
+            "用法: analyze_csv <csv路径> [min_bi_len] [analysis_window] | --compare [min_bi_len] [window] <csv>..."
+        );
+    }
+
+    if args[1] == "--compare" {
+        return run_compare(&args[2..]);
     }
 
     let path = &args[1];
@@ -169,6 +183,7 @@ fn main() -> Result<()> {
          ├─ update_bar      {:?}\n\
          └─ 信号评估 observe {:?}\n\
          pivots+segs        {:?}\n\
+         strict_pivots      {:?}\n\
          channels           {:?}\n\
          objects            {:?}",
         profile.rawbars,
@@ -176,6 +191,7 @@ fn main() -> Result<()> {
         profile.evolve_update,
         profile.evolve_observe,
         profile.pivots_segs,
+        profile.strict_pivots,
         profile.channels,
         profile.objects
     );
@@ -212,6 +228,162 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// --compare：笔中枢 vs 严格段中枢的量化对照，并按 A 验收阈值判定（不达标返回 Err）。
+struct CompareRow {
+    bi_count: usize,
+    strict_count: usize,
+    bi_med: f64,
+    strict_med: f64,
+    bi_narrow: f64,
+    strict_narrow: f64,
+    ok: bool,
+}
+
+fn run_compare(args: &[String]) -> Result<()> {
+    let mut nums = Vec::new();
+    let mut paths = Vec::new();
+    for a in args {
+        if paths.is_empty()
+            && let Ok(n) = a.parse::<usize>()
+        {
+            nums.push(n);
+            continue;
+        }
+        paths.push(a.clone());
+    }
+    if paths.is_empty() {
+        bail!("--compare 需要至少一个 csv 路径");
+    }
+    let min_bi_len = nums.first().copied().unwrap_or(6);
+    let window = nums.get(1).copied().unwrap_or(0) as u32;
+    println!("对比 min_bi_len={min_bi_len} window={window}");
+    println!(
+        "{:<26} {:>4} {:>6} {:>9} {:>9} {:>7} {:>7}  结果",
+        "file", "bi", "strict", "bi中位宽", "严中位宽", "bi窄%", "严窄%"
+    );
+    let mut fails = 0;
+    for path in &paths {
+        match compare_one(path, min_bi_len, window) {
+            Ok(r) => {
+                if !r.ok {
+                    fails += 1;
+                }
+                println!(
+                    "{:<26} {:>4} {:>6} {:>9.3} {:>9.3} {:>7.1} {:>7.1}  {}",
+                    short_name(path),
+                    r.bi_count,
+                    r.strict_count,
+                    r.bi_med,
+                    r.strict_med,
+                    r.bi_narrow * 100.0,
+                    r.strict_narrow * 100.0,
+                    if r.ok { "PASS" } else { "FAIL" }
+                );
+            }
+            Err(e) => {
+                fails += 1;
+                println!("{:<26} 失败: {e}", short_name(path));
+            }
+        }
+    }
+    if fails > 0 {
+        bail!(
+            "{fails}/{} 个文件未达标（阈值：严格数≤笔数×60%，严中位宽≥笔×1.5，严窄占比<笔）",
+            paths.len()
+        );
+    }
+    println!("全部达标");
+    Ok(())
+}
+
+fn compare_one(path: &str, min_bi_len: usize, window: u32) -> Result<CompareRow> {
+    let raw = fs::read(path).map_err(|e| anyhow!("读取 {path} 失败: {e}"))?;
+    let csv = String::from_utf8_lossy(&raw).into_owned();
+    let (len, series) = parse_csv(&csv)?;
+    // 窄中枢阈值用的波动基准：全序列平均单根振幅（近似 ATR）。
+    let atr = if len > 0 {
+        series
+            .high
+            .iter()
+            .zip(series.low.iter())
+            .map(|(h, l)| (*h - *l) as f64)
+            .sum::<f64>()
+            / len as f64
+    } else {
+        0.0
+    };
+    let request = AnalyzeRequest {
+        func_group: "single_level_structure".to_string(),
+        requested_func_ids: vec![301, 302, 303, 304, 305, 306, 307, 308],
+        freq_hint: infer_freq_hint(path),
+        data_len: len,
+        input_hash: 0,
+        series: Some(series),
+        options: Some(CzscOptions {
+            max_bi_num: 1000,
+            min_bi_len: min_bi_len as u32,
+            analysis_window: window,
+            include_objects: true,
+            enable_incremental: false,
+        }),
+        prefer_cached: false,
+    };
+    let config = AppConfig {
+        min_bi_len: min_bi_len as u32,
+        ..AppConfig::default()
+    };
+    let params = tdx_czsc_service::analyzer::AnalysisParams::from((&request, &config));
+    let snapshot = build_snapshot_profiled(&request, &params, None)?;
+
+    let bi_widths: Vec<f64> = snapshot.pivots.iter().map(|z| z.upper - z.lower).collect();
+    let st_widths: Vec<f64> = snapshot
+        .strict_pivots
+        .iter()
+        .map(|p| p.upper - p.lower)
+        .collect();
+    let bi_med = median(bi_widths.clone());
+    let strict_med = median(st_widths.clone());
+    let narrow = |w: &[f64]| {
+        if w.is_empty() || atr <= 0.0 {
+            0.0
+        } else {
+            w.iter().filter(|x| **x < 0.5 * atr).count() as f64 / w.len() as f64
+        }
+    };
+    let (bi_narrow, strict_narrow) = (narrow(&bi_widths), narrow(&st_widths));
+    let (bi_count, strict_count) = (snapshot.pivots.len(), snapshot.strict_pivots.len());
+    let ok = bi_count > 0
+        && (strict_count as f64) <= bi_count as f64 * 0.6
+        && (bi_med <= 0.0 || strict_med >= bi_med * 1.5)
+        && strict_narrow < bi_narrow;
+    Ok(CompareRow {
+        bi_count,
+        strict_count,
+        bi_med,
+        strict_med,
+        bi_narrow,
+        strict_narrow,
+        ok,
+    })
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    }
+}
+
+fn short_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// 返回 (bar 数, MarketSeries)

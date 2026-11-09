@@ -90,6 +90,12 @@ enum ChannelKind {
   // 中枢边界标记：区间首尾 K 线输出 1，用于在图上画闭合矩形
   CHANNEL_ZS_BOUNDARY = 304;
 
+  // 严格派段中枢通道（305–307 价格，308 边界码 level*10+edge）
+  CHANNEL_ZS_STRICT_UPPER = 305;
+  CHANNEL_ZS_STRICT_LOWER = 306;
+  CHANNEL_ZS_STRICT_MIDDLE = 307;
+  CHANNEL_ZS_STRICT_BOUNDARY = 308;
+
   // 买卖点通道
   CHANNEL_BUY1 = 401;
   CHANNEL_SELL1 = 402;
@@ -97,6 +103,8 @@ enum ChannelKind {
   CHANNEL_SELL2 = 404;
   CHANNEL_BUY3 = 405;
   CHANNEL_SELL3 = 406;
+  CHANNEL_BUY3_STRICT = 407;
+  CHANNEL_SELL3_STRICT = 408;
 
   // 诊断通道
   CHANNEL_DEBUG_CACHE_HIT = 901;
@@ -124,6 +132,16 @@ enum SignalKind {
   SIGNAL_SELL2 = 4;
   SIGNAL_BUY3 = 5;
   SIGNAL_SELL3 = 6;
+  SIGNAL_SEG_BUY3 = 7;
+  SIGNAL_SEG_SELL3 = 8;
+}
+
+// 严格派中枢类型
+enum PivotKind {
+  PIVOT_KIND_UNSPECIFIED = 0;
+  PIVOT_KIND_SEGMENT = 1;
+  PIVOT_KIND_NINE_SEGMENT_UPGRADE = 2;
+  PIVOT_KIND_EXPANSION = 3;
 }
 
 message AnalyzeRequest {
@@ -205,6 +223,9 @@ message AnalysisSnapshot {
   repeated PivotZone pivots = 5;
   repeated SignalPoint signals = 6;
   repeated Segment segments = 7;
+
+  // 严格派中枢对象（含笔中枢之外的段中枢；仅 include_objects=true 时填充）
+  repeated StrictPivotZone strict_pivots = 8;
 }
 
 message SnapshotMeta {
@@ -282,6 +303,21 @@ message SignalPoint {
   SignalKind kind = 2;
   double price = 3;
   string label = 4;
+}
+
+// 严格派中枢（段中枢/9 段升级/扩张）。阶段 A 只产出 level=1、不设 kind。
+message StrictPivotZone {
+  uint32 start_index = 1;
+  uint32 end_index = 2;
+  double upper = 3;   // ZG
+  double lower = 4;   // ZD
+  double middle = 5;  // ZZ
+  double gg = 6;
+  double dd = 7;
+  uint32 level = 8;
+  bool is_sure = 9;
+  uint32 move_count = 10;
+  PivotKind kind = 11;
 }
 
 message TimingStats {

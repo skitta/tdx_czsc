@@ -1,13 +1,15 @@
-{ 主图综合模板(结构版): 分型 + 笔 + 段 + 中枢 }
+{ 主图综合模板(结构版): 分型 + 笔 + 段 + 笔中枢 + 段中枢 }
 { 买卖点已剥离为独立脚本: 见 buy_sell_expert.tn6 (通达信专家系统指示) }
 { 服务调试(902/903通道)已注释, 需要时取消注释即可恢复 }
 { 前提: DLL 已绑定编号 1; 否则把 TDXDLL1 改为对应编号 }
 { 导入后请在公式属性中设置为: 主图叠加 }
 
 { ==== 显示开关: 1=开 0=关 (改数字即可, 不影响其它部分) ==== }
-{ 笔/段/中枢为缠论核心结构, 默认始终显示, 不设开关 }
+{ 分型/段线为缠论核心结构, 默认始终显示; 笔中枢/段中枢可单独开关 }
 分型开关:=1;
 段开关:=1;
+笔中枢开关:=1;
+段中枢开关:=1;
 { 调试开关:=1; }   { 已注释: 调试功能默认关闭 }
 
 { ==== 通道读取 (中间变量, 不画线) ==== }
@@ -19,9 +21,12 @@
 笔向:=TDXDLL1(202,HIGH,LOW,CLOSE);
 段端:=TDXDLL1(203,HIGH,LOW,CLOSE);
 段向:=TDXDLL1(204,HIGH,LOW,CLOSE);
-中枢上:=TDXDLL1(301,HIGH,LOW,CLOSE);
-中枢下:=TDXDLL1(302,HIGH,LOW,CLOSE);
-中枢界:=TDXDLL1(304,HIGH,LOW,CLOSE);
+中枢上:=TDXDLL1(301,HIGH,LOW,CLOSE)*笔中枢开关;
+中枢下:=TDXDLL1(302,HIGH,LOW,CLOSE)*笔中枢开关;
+中枢界:=TDXDLL1(304,HIGH,LOW,CLOSE)*笔中枢开关;
+段中枢上:=TDXDLL1(305,HIGH,LOW,CLOSE)*段中枢开关;
+段中枢下:=TDXDLL1(306,HIGH,LOW,CLOSE)*段中枢开关;
+段中枢界:=TDXDLL1(308,HIGH,LOW,CLOSE)*段中枢开关;
 { 服务:=TDXDLL1(902,HIGH,LOW,CLOSE); }   { 已注释: 调试通道(服务状态) }
 { 耗时:=TDXDLL1(903,HIGH,LOW,CLOSE); }   { 已注释: 调试通道(最近请求耗时) }
 
@@ -64,6 +69,36 @@ DRAWTEXT(笔端>0,笔端,'·'),COLORWHITE;
 STICKLINE(中枢界=1,中枢下,中枢上,1,0),COLORBLUE;
 STICKLINE(中枢界=2,中枢下,中枢上,1,0),COLORBLUE;
 STICKLINE(中枢界=3,MIN(中枢下,REF(中枢下,1)),MAX(中枢上,REF(中枢上,1)),1,0),COLORBLUE;
+
+{ ==== 段中枢(严格派): 与笔中枢蓝色区分 ==== }
+{ 305/306=段中枢上/下价(虚取负); 308=level*10+edge(0区间内/1左界/2右界, 负=虚) }
+{ 级别: 1=段中枢(洋红) 2=9段升级/扩张(红) 3=扩张(黄); 虚中枢统一灰色 }
+段实:=段中枢界>0;
+段虚:=段中枢界<0;
+段级别:=INTPART(ABS(段中枢界)/10);
+段边界:=ABS(段中枢界)-段级别*10;
+
+{ 段中枢上下沿: 区间外 DRAWNULL 断开 }
+段L1上:IF(段实 AND 段级别=1,段中枢上,DRAWNULL),COLORMAGENTA;
+段L1下:IF(段实 AND 段级别=1,段中枢下,DRAWNULL),COLORMAGENTA;
+段L2上:IF(段实 AND 段级别=2,段中枢上,DRAWNULL),COLORRED;
+段L2下:IF(段实 AND 段级别=2,段中枢下,DRAWNULL),COLORRED;
+段L3上:IF(段实 AND 段级别=3,段中枢上,DRAWNULL),COLORYELLOW;
+段L3下:IF(段实 AND 段级别=3,段中枢下,DRAWNULL),COLORYELLOW;
+
+{ 段中枢左右竖线 }
+STICKLINE(段实 AND 段边界=1 AND 段级别=1,ABS(段中枢下),ABS(段中枢上),1,0),COLORMAGENTA;
+STICKLINE(段实 AND 段边界=2 AND 段级别=1,ABS(段中枢下),ABS(段中枢上),1,0),COLORMAGENTA;
+STICKLINE(段实 AND 段边界=1 AND 段级别=2,ABS(段中枢下),ABS(段中枢上),1,0),COLORRED;
+STICKLINE(段实 AND 段边界=2 AND 段级别=2,ABS(段中枢下),ABS(段中枢上),1,0),COLORRED;
+STICKLINE(段实 AND 段边界=1 AND 段级别=3,ABS(段中枢下),ABS(段中枢上),1,0),COLORYELLOW;
+STICKLINE(段实 AND 段边界=2 AND 段级别=3,ABS(段中枢下),ABS(段中枢上),1,0),COLORYELLOW;
+
+{ 虚段中枢: 灰色 }
+段虚上:IF(段虚,-段中枢上,DRAWNULL),COLORGRAY;
+段虚下:IF(段虚,-段中枢下,DRAWNULL),COLORGRAY;
+STICKLINE(段虚 AND 段边界=1,ABS(段中枢下),ABS(段中枢上),1,0),COLORGRAY;
+STICKLINE(段虚 AND 段边界=2,ABS(段中枢下),ABS(段中枢上),1,0),COLORGRAY;
 
 { ==== 服务调试 (已注释: 需要时取消注释即可恢复) ==== }
 { 最后一根K线显示服务状态与最近耗时 }

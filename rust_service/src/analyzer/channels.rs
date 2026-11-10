@@ -195,8 +195,10 @@ fn resolve_channel_meta(func_id: u32) -> Result<(i32, &'static str), AnalysisErr
 
 fn fill_fractal_channel(values: &mut [f32], fractals: &[FX], mark: Mark) {
     for fx in fractals.iter().filter(|fx| fx.mark == mark) {
-        if let Some(index) = fx_mid_index(fx) {
-            values[index] = fx.fx as f32;
+        if let Some(index) = fx_mid_index(fx)
+            && let Some(slot) = values.get_mut(index)
+        {
+            *slot = fx.fx as f32;
         }
     }
 }
@@ -204,11 +206,15 @@ fn fill_fractal_channel(values: &mut [f32], fractals: &[FX], mark: Mark) {
 fn fill_bi_points_channel(values: &mut [f32], finished_bis: &[BI]) {
     for bi in finished_bis {
         // 每笔的起止分型都标注（此前只填终点 fx_b，第一笔起点缺失）
-        if let Some(index) = fx_mid_index(&bi.fx_a) {
-            values[index] = bi.fx_a.fx as f32;
+        if let Some(index) = fx_mid_index(&bi.fx_a)
+            && let Some(slot) = values.get_mut(index)
+        {
+            *slot = bi.fx_a.fx as f32;
         }
-        if let Some(index) = fx_mid_index(&bi.fx_b) {
-            values[index] = bi.fx_b.fx as f32;
+        if let Some(index) = fx_mid_index(&bi.fx_b)
+            && let Some(slot) = values.get_mut(index)
+        {
+            *slot = bi.fx_b.fx as f32;
         }
     }
 }
@@ -243,13 +249,15 @@ fn fill_seg_points_channel(values: &mut [f32], finished_bis: &[BI], segs: &[Segm
     for seg in segs.iter().filter(|s| s.is_sure) {
         if let Some(start_bi) = finished_bis.get(seg.start_bi_idx)
             && let Some(index) = fx_mid_index(&start_bi.fx_a)
+            && let Some(slot) = values.get_mut(index)
         {
-            values[index] = start_bi.fx_a.fx as f32;
+            *slot = start_bi.fx_a.fx as f32;
         }
         if let Some(end_bi) = finished_bis.get(seg.end_bi_idx)
             && let Some(index) = fx_mid_index(&end_bi.fx_b)
+            && let Some(slot) = values.get_mut(index)
         {
-            values[index] = end_bi.fx_b.fx as f32;
+            *slot = end_bi.fx_b.fx as f32;
         }
     }
 }
@@ -292,6 +300,10 @@ fn fill_zs_channel(values: &mut [f32], pivots: &[ZS], field: ZsField) {
         let Some((start, end)) = zs_span(zs) else {
             continue;
         };
+        // 与 fill_zs_boundary_channel / fill_strict_price 一致：越界即跳过。
+        if end >= values.len() {
+            continue;
+        }
 
         let pivot_value = match field {
             ZsField::Upper => zs.zg,
@@ -340,7 +352,9 @@ fn fill_zs_boundary_channel(values: &mut [f32], pivots: &[ZS]) {
 
 fn fill_signal_channel(values: &mut [f32], buy_sell_points: &[BuySellPoint], func_id: u32) {
     for point in buy_sell_points.iter().filter(|p| p.func_id == func_id) {
-        values[point.index] = point.price as f32;
+        if let Some(slot) = values.get_mut(point.index) {
+            *slot = point.price as f32;
+        }
     }
 }
 
@@ -357,17 +371,6 @@ pub(crate) const SUPPORTED_FUNC_IDS: &[u32] = &[
 mod tests {
     use super::*;
     use crate::analyzer::strict_pivots::PivotKind;
-
-    #[test]
-    fn channel_meta_covers_all_supported_ids() {
-        const ALL: [u32; 17] = [
-            101, 102, 201, 202, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903,
-        ];
-        for id in ALL {
-            assert!(resolve_channel_meta(id).is_ok(), "func_id {id} 缺元数据");
-        }
-        assert!(resolve_channel_meta(999).is_err());
-    }
 
     #[test]
     fn empty_channel_has_zeros() {
@@ -416,5 +419,6 @@ mod tests {
                 "func_id {id} 缺元数据"
             );
         }
+        assert!(resolve_channel_meta(999).is_err());
     }
 }

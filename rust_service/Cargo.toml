@@ -21,6 +21,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [build-dependencies]
 prost-build = "0.13"
 
+# 机械性问题的统一拦截（见仓库根目录 ISSUES.md）。用 warn 而非 deny：
+# 数值/协议转换仍有人工判断的例外，避免把日常构建变成 lint 战场。
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# 中文注释里的行内英文标识符不需要反引号（约 124 处噪音）
+doc_markdown = "allow"
+# 数值通道转换的口径需要逐处判断，保留给人工审查
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+# 大量函数是 Python 版规则的 1:1 端口，名称重复是必要的语义
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
 # 发布构建（P2 实测决策）：thin LTO + codegen-units=1 仅带来 ~5% 性能
 # 增益但 release 构建时间约 10 倍（6m49s vs ~40s），负收益弃用；
 # strip=debuginfo 零编译代价，减小部署体积（保留）。

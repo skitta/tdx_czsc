@@ -75,22 +75,24 @@ impl From<(&AnalyzeRequest, &AppConfig)> for AnalysisParams {
     fn from((request, config): (&AnalyzeRequest, &AppConfig)) -> Self {
         let options = request.options.as_ref();
         Self {
-            analysis_window: options
-                .map(|x| x.analysis_window)
-                .filter(|x| *x > 0)
-                .unwrap_or(config.default_analysis_window),
-            max_bi_num: options
-                .map(|x| x.max_bi_num)
-                .filter(|x| *x > 0)
-                .unwrap_or(config.max_bi_num),
-            min_bi_len: options
-                .map(|x| x.min_bi_len)
-                .filter(|x| *x > 0)
-                .unwrap_or(config.min_bi_len),
+            analysis_window: pick(
+                options.map_or(0, |x| x.analysis_window),
+                config.default_analysis_window,
+            ),
+            max_bi_num: pick(options.map_or(0, |x| x.max_bi_num), config.max_bi_num),
+            min_bi_len: pick(options.map_or(0, |x| x.min_bi_len), config.min_bi_len),
             derive_volume_proxy: config.derive_volume_proxy,
             czsc_version: config.czsc_version.clone(),
         }
     }
+}
+
+/// 参数解析唯一规则：请求显式给的正数优先，否则回退配置。
+///
+/// 缓存键（`CacheKey`）、分析参数、快照装配与 meta 必须走同一规则，
+/// 否则缓存键与分析参数会悄悄分叉。
+pub(crate) fn pick(option: u32, config: u32) -> u32 {
+    if option > 0 { option } else { config }
 }
 
 /// 执行一次全量分析并生成快照（CPU 密集，由调用方放入阻塞线程池）。
@@ -142,10 +144,10 @@ pub fn build_snapshot_profiled(
 
     validate_series_lengths(request.data_len, series)?;
 
-    let analysis_window = options
-        .map(|x| x.analysis_window)
-        .filter(|x| *x > 0)
-        .unwrap_or(params.analysis_window);
+    let analysis_window = pick(
+        options.map_or(0, |x| x.analysis_window),
+        params.analysis_window,
+    );
 
     let freq = parse_freq(&request.freq_hint)?;
     let window_start = window_start_of(data_len, analysis_window);
@@ -161,14 +163,8 @@ pub fn build_snapshot_profiled(
         ));
     }
 
-    let max_bi_num = options
-        .map(|x| x.max_bi_num)
-        .filter(|x| *x > 0)
-        .unwrap_or(params.max_bi_num) as usize;
-    let min_bi_len = options
-        .map(|x| x.min_bi_len)
-        .filter(|x| *x > 0)
-        .unwrap_or(params.min_bi_len) as usize;
+    let max_bi_num = pick(options.map_or(0, |x| x.max_bi_num), params.max_bi_num) as usize;
+    let min_bi_len = pick(options.map_or(0, |x| x.min_bi_len), params.min_bi_len) as usize;
 
     let wants_signals = requested_func_ids(request)
         .iter()
@@ -265,10 +261,10 @@ fn assemble_snapshot_profiled(
 ) -> Result<AnalysisSnapshot, AnalysisError> {
     let options = request.options.as_ref();
     let data_len = request.data_len as usize;
-    let analysis_window = options
-        .map(|x| x.analysis_window)
-        .filter(|x| *x > 0)
-        .unwrap_or(params.analysis_window);
+    let analysis_window = pick(
+        options.map_or(0, |x| x.analysis_window),
+        params.analysis_window,
+    );
 
     let fractals = czsc.get_fx_list();
     // 已完成的笔（get_finished_bis 已处理"最后一笔待确认"的实时场景：

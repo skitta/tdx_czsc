@@ -46,6 +46,11 @@ impl SnapshotCache {
     }
 
     pub fn insert(&mut self, key: CacheKey, snapshot: AnalysisSnapshot) {
+        // capacity == 0 语义是"不缓存"：空队列时 pop_front() 返回 None，
+        // 否则会照样插入一条。
+        if self.capacity == 0 {
+            return;
+        }
         if self.entries.contains_key(&key) {
             self.entries.insert(key.clone(), snapshot);
             self.order.retain(|k| k != &key);

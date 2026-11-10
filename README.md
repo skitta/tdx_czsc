@@ -80,7 +80,7 @@ flowchart LR
   稳态维护（滚动/缩放零重算，历史区域始终有完整结构标注）
 - ✅ **量能背驰**：950 量能输入通道融合真实 VOL；未挂载时自动以振幅代理量兜底
 - ✅ **Windows 全链路**：Named Pipe 服务 + 自动拉起/退出回收（Job Object）+ 冒烟测试
-- ✅ **公式模板**：结构主图模板 `tdx_formula_examples/main_chart_full.tn6`；严格派中枢主图模板 `main_chart_strict.tn6`
+- ✅ **公式模板**：结构主图模板 `tdx_formula_examples/main_chart_full.tn6`（含笔中枢与段中枢）；严格派中枢主图模板 `main_chart_strict.tn6`
   （分型/笔/中枢/段）+ 买卖点专家系统指示 `tdx_formula_examples/buy_sell_expert.tn6`
   （401~406 → ENTERLONG/EXITLONG 买卖信号，可回测；B/S 箭头由系统绘制，
   类型文字标注见 `buy_sell_mark.tn6`）

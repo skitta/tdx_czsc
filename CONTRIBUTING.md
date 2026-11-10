@@ -77,6 +77,7 @@
 | `analyzer/mod.rs` | 快照编排（`build_snapshot`）+ `AnalysisParams` | 只依赖子模块 |
 | `analyzer/rawbars.rs` | 请求 → RawBar（频率/量能/时间轴） | → error |
 | `analyzer/pivots.rs` | 中枢构建（前端/后端优化）+ 三买卖严格化 | → objects（仅下标对齐） |
+| `analyzer/strict_pivots.rs` | 严格派段中枢 / 9 段升级 / 扩张 / 407–408 | → objects（仅下标对齐） |
 | `analyzer/segs.rs` | 线段识别（特征序列分型法） | 无 |
 | `analyzer/signals.rs` | 401~406 买卖点信号 | → objects（锚点对齐） |
 | `analyzer/channels.rs` | func_id → float[] 通道 + 单一映射表 | → objects/segs/signals |

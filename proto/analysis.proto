@@ -305,7 +305,7 @@ message SignalPoint {
   string label = 4;
 }
 
-// 严格派中枢（段中枢/9 段升级/扩张）。阶段 A 只产出 level=1、不设 kind。
+// 严格派中枢（段中枢/9 段升级/扩张）。
 message StrictPivotZone {
   uint32 start_index = 1;
   uint32 end_index = 2;

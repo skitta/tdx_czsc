@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
@@ -75,6 +76,50 @@ void PrintChannelPreview(const std::unordered_map<std::uint32_t, std::vector<flo
     std::cout << '\n';
 }
 
+bool AssertStrictChannels(const tdx_czsc::AnalysisSnapshotCpp& snapshot) {
+    const std::uint32_t ids[] = {305, 306, 307, 308, 407, 408};
+    for (const std::uint32_t id : ids) {
+        if (snapshot.channels.find(id) == snapshot.channels.end()) {
+            std::cerr << "strict channel missing: " << id << '\n';
+            return false;
+        }
+    }
+
+    // 308 只允许 0 或 level*10+edge（level 1..3，edge 0..2）；负号表示虚中枢。
+    for (const float value : snapshot.channels.at(308)) {
+        if (value == 0.0f) {
+            continue;
+        }
+        if (!std::isfinite(value)) {
+            return false;
+        }
+        const int code = static_cast<int>(std::fabs(value));
+        const int level = code / 10;
+        const int edge = code % 10;
+        if (level < 1 || level > 3 || edge > 2) {
+            std::cerr << "invalid strict boundary code: " << value << '\n';
+            return false;
+        }
+    }
+    for (const std::uint32_t id : {305u, 306u, 307u}) {
+        const auto& values = snapshot.channels.at(id);
+        if (!std::all_of(values.begin(), values.end(),
+                         [](float v) { return std::isfinite(v); })) {
+            std::cerr << "invalid strict price channel: " << id << '\n';
+            return false;
+        }
+    }
+    for (const std::uint32_t id : {407u, 408u}) {
+        const auto& values = snapshot.channels.at(id);
+        if (!std::all_of(values.begin(), values.end(),
+                         [](float v) { return std::isfinite(v) && v >= 0.0f; })) {
+            std::cerr << "invalid strict signal channel: " << id << '\n';
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() {
@@ -92,6 +137,26 @@ int main() {
     std::cout << "  analysis_window      : " << config.analysis_window << '\n';
     std::cout << "  dll_cache_capacity   : " << config.dll_cache_capacity << '\n';
     std::cout << '\n';
+
+    // ==== 严格中枢通道注册自检 ====
+    {
+        const std::uint32_t expected[] = {305, 306, 307, 308, 407, 408};
+        for (const std::uint32_t id : expected) {
+            bool found = false;
+            for (PluginTCalcFuncInfo* p = tdx_czsc::GetFunctionRegistry();
+                 p != nullptr && p->pCallFunc != nullptr; ++p) {
+                if (p->nFuncMark == id) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::cerr << "func_id=" << id << " not registered\n";
+                return 1;
+            }
+        }
+        std::cout << "  strict_funcs_registered : ok\n";
+    }
 
     // ==== 指纹/周期映射自检 ====
     // 只改中间 K 线、保持前 32 根和末根不变，指纹必须变化。
@@ -271,6 +336,10 @@ int main() {
     std::cout << "  service_cache_hit: " << (snapshot.service_cache_hit ? "true" : "false") << '\n';
     std::cout << "  latency_ms       : " << snapshot.latency_ms << '\n';
     std::cout << "  channel_count    : " << snapshot.channels.size() << '\n';
+    if (!AssertStrictChannels(snapshot)) {
+        tdx_czsc::LogError("ipc_smoke_test strict channel assertion failed");
+        return 1;
+    }
 
     PrintChannelPreview(snapshot.channels, 101);
     PrintChannelPreview(snapshot.channels, 102);

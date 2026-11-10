@@ -19,7 +19,7 @@ use czsc_core::objects::mark::Mark;
 use czsc_core::objects::zs::ZS;
 
 use crate::analyzer::segs::Segment;
-use crate::analyzer::strict_pivots::StrictPivot;
+use crate::analyzer::strict_pivots::{StrictPivot, seg_envelope};
 use crate::proto::analysis::{
     Direction as ProtoDirection, FractalMark, FractalPoint, PivotZone, Segment as ProtoSegment,
     StrictPivotZone, StrokeSegment,
@@ -29,14 +29,23 @@ use crate::proto::analysis::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AlignError;
 
+impl std::fmt::Display for AlignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("对象无法对齐到原始 K 线下标")
+    }
+}
+
+impl std::error::Error for AlignError {}
+
 /// 分型在原始K线序列中的索引（通道对齐用）。
 pub(crate) fn fx_mid_index(fx: &FX) -> Option<usize> {
     let mid = fx.elements.get(1)?;
-    mid.elements
+    let id = mid
+        .elements
         .iter()
         .find(|bar| bar.dt == fx.dt)
-        .map(|bar| bar.id as usize)
-        .or(Some(mid.id as usize))
+        .map_or(mid.id, |bar| bar.id);
+    usize::try_from(id).ok()
 }
 
 /// 笔起点分型在原始K线序列中的索引。
@@ -150,6 +159,7 @@ pub(crate) fn map_segment(seg: &Segment, bis: &[BI]) -> Option<ProtoSegment> {
     let end_bi = bis.get(seg.end_bi_idx)?;
     let start_index = fx_mid_index(&start_bi.fx_a)?;
     let end_index = fx_mid_index(&end_bi.fx_b)?;
+    let (high, low) = seg_envelope(bis, seg)?;
 
     Some(ProtoSegment {
         start_bi_index: seg.start_bi_idx as u32,
@@ -159,8 +169,8 @@ pub(crate) fn map_segment(seg: &Segment, bis: &[BI]) -> Option<ProtoSegment> {
         direction: proto_direction(seg.direction),
         start_price: start_bi.fx_a.fx,
         end_price: end_bi.fx_b.fx,
-        high: start_bi.get_high().max(end_bi.get_high()),
-        low: start_bi.get_low().min(end_bi.get_low()),
+        high,
+        low,
         is_sure: seg.is_sure,
     })
 }
@@ -188,5 +198,25 @@ mod tests {
         let mut bi = make_series_bi(0, 10.0, 20.0);
         bi.fx_a.elements.clear();
         assert_eq!(StrokeSegment::try_from(&bi), Err(AlignError));
+    }
+
+    /// 段对象高低必须取段内全部笔的包络，而不是只看首末笔。
+    #[test]
+    fn map_segment_uses_full_envelope() {
+        let points = [20.0, 10.0, 30.0, 5.0, 25.0, 15.0];
+        let bis: Vec<BI> = points
+            .windows(2)
+            .enumerate()
+            .map(|(i, w)| make_series_bi(i as i64, w[0], w[1]))
+            .collect();
+        let segment = Segment {
+            start_bi_idx: 0,
+            end_bi_idx: bis.len() - 1,
+            direction: CzscDirection::Down,
+            is_sure: true,
+        };
+        let object = map_segment(&segment, &bis).expect("segment object");
+        assert_eq!(object.high, 30.0);
+        assert_eq!(object.low, 5.0);
     }
 }

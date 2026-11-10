@@ -26,7 +26,8 @@ use super::signals::{BuySellPoint, SignalEvaluator};
 /// 单根 K 线一致性判定（构造自同一 `build_raw_bars` 逻辑，f32→f64
 /// 转换位级一致，逐字段精确比较即可）。
 fn same_bar(a: &RawBar, b: &RawBar) -> bool {
-    a.dt == b.dt
+    a.id == b.id
+        && a.dt == b.dt
         && a.open == b.open
         && a.high == b.high
         && a.low == b.low
@@ -184,6 +185,11 @@ impl IncrementalCache {
     }
 
     pub(crate) fn put(&mut self, key: IncrementalKey, state: IncrementalState) {
+        // capacity == 0 语义是"不缓存"：空队列时 pop_front() 返回 None，
+        // 否则会照样插入一条。
+        if self.capacity == 0 {
+            return;
+        }
         if self.entries.contains_key(&key) {
             self.entries.insert(key.clone(), state);
             self.order.retain(|k| k != &key);

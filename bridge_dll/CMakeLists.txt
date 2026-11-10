@@ -70,6 +70,11 @@ add_executable(tdx_czsc_deploy_smoke
     tests/deploy_host_smoke.cpp
 )
 
+add_executable(tdx_czsc_output_mapper_test
+    tests/output_mapper_test.cpp
+    src/bridge_output_mapper.cpp
+)
+
 target_include_directories(tdx_czsc_deploy_smoke
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -78,10 +83,19 @@ target_include_directories(tdx_czsc_deploy_smoke
 target_compile_features(tdx_czsc_deploy_smoke PRIVATE cxx_std_20)
 target_compile_definitions(tdx_czsc_deploy_smoke PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 
+target_include_directories(tdx_czsc_output_mapper_test
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_features(tdx_czsc_output_mapper_test PRIVATE cxx_std_20)
+
 if(MSVC)
     target_compile_options(tdx_czsc_deploy_smoke PRIVATE /W4 /EHsc /utf-8)
+    target_compile_options(tdx_czsc_output_mapper_test PRIVATE /W4 /EHsc /utf-8)
 else()
     target_compile_options(tdx_czsc_deploy_smoke PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(tdx_czsc_output_mapper_test PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 target_include_directories(tdx_czsc_ipc_smoke_test

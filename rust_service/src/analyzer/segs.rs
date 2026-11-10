@@ -265,7 +265,12 @@ impl EigenFX {
         } else if self.ele[2].is_none() {
             self.treat_third_ele(bi_idx, bis)
         } else {
-            panic!("特征序列3个元素都找齐了还没处理!! bi_idx={bi_idx}");
+            // 三个元素齐备仍继续入列属状态机异常：重置后从当前笔重新开始，
+            // 不让异常行情数据把分析线程打崩。
+            debug_assert!(false, "特征序列已有 3 个元素: bi_idx={bi_idx}");
+            self.clear();
+            self.lst.push(bi_idx);
+            self.treat_first_ele(bi_idx, bis)
         }
     }
 

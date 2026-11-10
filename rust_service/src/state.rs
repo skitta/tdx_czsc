@@ -37,7 +37,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: AppConfig) -> Arc<Self> {
-        let analysis_parallelism = config.analysis_parallelism;
+        // 0 会让 Semaphore::new(0) 永久阻塞全部分析请求。
+        let analysis_parallelism = config.analysis_parallelism.max(1);
         Arc::new(Self {
             cache: RwLock::new(SnapshotCache::new(config.cache_capacity)),
             incremental: Mutex::new(IncrementalCache::new(config.incremental_cache_capacity)),

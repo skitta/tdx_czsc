@@ -238,6 +238,10 @@ struct CompareRow {
     strict_med: f64,
     bi_narrow: f64,
     strict_narrow: f64,
+    strict_virtual: f64,
+    strict_per_k: f64,
+    signal_hits: usize,
+    strict_us: f64,
     ok: bool,
 }
 
@@ -256,22 +260,35 @@ fn run_compare(args: &[String]) -> Result<()> {
     if paths.is_empty() {
         bail!("--compare 需要至少一个 csv 路径");
     }
-    let min_bi_len = nums.first().copied().unwrap_or(6);
+    // 与单文件模式保持一致；计划中的 --compare 命令不带参数。
+    let min_bi_len = nums.first().copied().unwrap_or(3);
     let window = nums.get(1).copied().unwrap_or(0) as u32;
     println!("对比 min_bi_len={min_bi_len} window={window}");
     println!(
-        "{:<26} {:>4} {:>6} {:>9} {:>9} {:>7} {:>7}  结果",
-        "file", "bi", "strict", "bi中位宽", "严中位宽", "bi窄%", "严窄%"
+        "{:<26} {:>4} {:>6} {:>9} {:>9} {:>7} {:>7} {:>7} {:>8} {:>8} {:>10}  结果",
+        "file",
+        "bi",
+        "严L1",
+        "bi中位宽",
+        "严中位宽",
+        "bi窄%",
+        "严窄%",
+        "严虚%",
+        "严/千根",
+        "407/408",
+        "严耗时us"
     );
     let mut fails = 0;
+    let mut signal_hits = 0;
     for path in &paths {
         match compare_one(path, min_bi_len, window) {
             Ok(r) => {
                 if !r.ok {
                     fails += 1;
                 }
+                signal_hits += r.signal_hits;
                 println!(
-                    "{:<26} {:>4} {:>6} {:>9.3} {:>9.3} {:>7.1} {:>7.1}  {}",
+                    "{:<26} {:>4} {:>6} {:>9.3} {:>9.3} {:>7.1} {:>7.1} {:>7.1} {:>8.2} {:>8} {:>10.1}  {}",
                     short_name(path),
                     r.bi_count,
                     r.strict_count,
@@ -279,6 +296,10 @@ fn run_compare(args: &[String]) -> Result<()> {
                     r.strict_med,
                     r.bi_narrow * 100.0,
                     r.strict_narrow * 100.0,
+                    r.strict_virtual * 100.0,
+                    r.strict_per_k,
+                    r.signal_hits,
+                    r.strict_us,
                     if r.ok { "PASS" } else { "FAIL" }
                 );
             }
@@ -288,9 +309,12 @@ fn run_compare(args: &[String]) -> Result<()> {
             }
         }
     }
-    if fails > 0 {
+    if signal_hits == 0 {
+        println!("阶段 B 验收失败：所有文件合计未命中 407/408");
+    }
+    if fails > 0 || signal_hits == 0 {
         bail!(
-            "{fails}/{} 个文件未达标（阈值：严格数≤笔数×60%，严中位宽≥笔×1.5，严窄占比<笔）",
+            "{fails}/{} 个文件未达标（阈值：严格数≤笔数×60%，严中位宽≥笔×1.5，严窄占比<笔，407/408≥1）",
             paths.len()
         );
     }
@@ -302,18 +326,7 @@ fn compare_one(path: &str, min_bi_len: usize, window: u32) -> Result<CompareRow>
     let raw = fs::read(path).map_err(|e| anyhow!("读取 {path} 失败: {e}"))?;
     let csv = String::from_utf8_lossy(&raw).into_owned();
     let (len, series) = parse_csv(&csv)?;
-    // 窄中枢阈值用的波动基准：全序列平均单根振幅（近似 ATR）。
-    let atr = if len > 0 {
-        series
-            .high
-            .iter()
-            .zip(series.low.iter())
-            .map(|(h, l)| (*h - *l) as f64)
-            .sum::<f64>()
-            / len as f64
-    } else {
-        0.0
-    };
+    let atr = atr14(&series);
     let request = AnalyzeRequest {
         func_group: "single_level_structure".to_string(),
         requested_func_ids: vec![301, 302, 303, 304, 305, 306, 307, 308],
@@ -335,29 +348,60 @@ fn compare_one(path: &str, min_bi_len: usize, window: u32) -> Result<CompareRow>
         ..AppConfig::default()
     };
     let params = tdx_czsc_service::analyzer::AnalysisParams::from((&request, &config));
-    let snapshot = build_snapshot_profiled(&request, &params, None)?;
+    let mut profile = tdx_czsc_service::analyzer::SnapshotProfile::default();
+    let snapshot = build_snapshot_profiled(&request, &params, Some(&mut profile))?;
 
-    let bi_widths: Vec<f64> = snapshot.pivots.iter().map(|z| z.upper - z.lower).collect();
-    let st_widths: Vec<f64> = snapshot
+    let bi_pairs: Vec<(f64, usize)> = snapshot
+        .pivots
+        .iter()
+        .map(|z| (z.upper - z.lower, z.end_index as usize))
+        .collect();
+    // 量化门槛只比较级别 1 段中枢与笔中枢；级别 2/3 是段中枢的升级/扩张，
+    // 与笔中枢不是同一构成单元，计入会虚增数量和窄中枢占比。
+    let st_pairs: Vec<(f64, usize)> = snapshot
         .strict_pivots
         .iter()
-        .map(|p| p.upper - p.lower)
+        .filter(|p| p.level == 1)
+        .map(|p| (p.upper - p.lower, p.end_index as usize))
         .collect();
+    let bi_widths: Vec<f64> = bi_pairs.iter().map(|(w, _)| *w).collect();
+    let st_widths: Vec<f64> = st_pairs.iter().map(|(w, _)| *w).collect();
     let bi_med = median(bi_widths.clone());
     let strict_med = median(st_widths.clone());
-    let narrow = |w: &[f64]| {
-        if w.is_empty() || atr <= 0.0 {
+    let narrow = |pairs: &[(f64, usize)]| {
+        if pairs.is_empty() {
             0.0
         } else {
-            w.iter().filter(|x| **x < 0.5 * atr).count() as f64 / w.len() as f64
+            let hits = pairs
+                .iter()
+                .filter(|(w, end)| atr.get(*end).is_some_and(|a| *a > 0.0 && *w < 0.5 * *a))
+                .count();
+            hits as f64 / pairs.len() as f64
         }
     };
-    let (bi_narrow, strict_narrow) = (narrow(&bi_widths), narrow(&st_widths));
-    let (bi_count, strict_count) = (snapshot.pivots.len(), snapshot.strict_pivots.len());
+    let (bi_narrow, strict_narrow) = (narrow(&bi_pairs), narrow(&st_pairs));
+    let (bi_count, strict_count) = (snapshot.pivots.len(), st_pairs.len());
+    let strict_virtual = if strict_count == 0 {
+        0.0
+    } else {
+        snapshot
+            .strict_pivots
+            .iter()
+            .filter(|p| p.level == 1 && !p.is_sure)
+            .count() as f64
+            / strict_count as f64
+    };
+    let strict_per_k = strict_count as f64 * 1000.0 / len.max(1) as f64;
+    let signal_hits = snapshot
+        .signals
+        .iter()
+        .filter(|s| s.kind == 7 || s.kind == 8)
+        .count();
     let ok = bi_count > 0
         && (strict_count as f64) <= bi_count as f64 * 0.6
         && (bi_med <= 0.0 || strict_med >= bi_med * 1.5)
-        && strict_narrow < bi_narrow;
+        // 两边都没有窄中枢（0 < 0 不成立）时视为不劣于笔中枢。
+        && (strict_narrow < bi_narrow || (strict_narrow == 0.0 && bi_narrow == 0.0));
     Ok(CompareRow {
         bi_count,
         strict_count,
@@ -365,8 +409,41 @@ fn compare_one(path: &str, min_bi_len: usize, window: u32) -> Result<CompareRow>
         strict_med,
         bi_narrow,
         strict_narrow,
+        strict_virtual,
+        strict_per_k,
+        signal_hits,
+        strict_us: profile.strict_pivots.as_secs_f64() * 1_000_000.0,
         ok,
     })
+}
+
+/// 逐 bar ATR(14)：真实波幅的 14 根简单均值。窄中枢阈值按各自 end_index 取局部值。
+fn atr14(series: &MarketSeries) -> Vec<f64> {
+    let n = series.close.len();
+    let mut tr = vec![0.0; n];
+    for (i, value) in tr.iter_mut().enumerate() {
+        let prev_close = if i > 0 {
+            series.close[i - 1] as f64
+        } else {
+            series.close[i] as f64
+        };
+        let high = series.high[i] as f64;
+        let low = series.low[i] as f64;
+        *value = (high - low)
+            .abs()
+            .max((high - prev_close).abs())
+            .max((low - prev_close).abs());
+    }
+    let mut atr = vec![0.0; n];
+    let mut sum = 0.0;
+    for i in 0..n {
+        sum += tr[i];
+        if i >= 14 {
+            sum -= tr[i - 14];
+        }
+        atr[i] = sum / (i + 1).min(14) as f64;
+    }
+    atr
 }
 
 fn median(mut values: Vec<f64>) -> f64 {

@@ -567,6 +567,8 @@ pub(crate) struct SignalEvaluator {
     cache: TaCache,
     /// P1 快速均线缓存（second/third 信号重实现使用）
     ma_fast: MaSeriesCache,
+    /// 信号函数参数表。当前不开放自定义参数，只作为 `ParamView` 的空来源
+    /// （`cxt_*` 函数全部走默认值）；如需暴露参数，从请求选项填充此处。
     params: HashMap<String, Value>,
     points: Vec<BuySellPoint>,
     pending: Vec<PendingPoint>,
@@ -749,6 +751,10 @@ pub(crate) fn evolve_bars_profiled(
     (czsc, evaluator)
 }
 
+/// 全量计算结构与买卖点（公开入口；演化语义见 `evolve_bars`）。
+///
+/// # Panics
+/// `bars` 为空时 panic：调用方须先保证至少有一根 K 线。
 pub fn compute_buy_sell_points(
     bars: &[RawBar],
     max_bi_num: usize,
@@ -786,7 +792,7 @@ fn bi_state_fingerprint(czsc: &CZSC) -> (usize, i32, u64) {
                 hash ^= value;
                 hash = hash.wrapping_mul(1099511628211);
             };
-            mix(bar.id as u64);
+            mix(u64::from(bar.id.unsigned_abs()));
             for value in [bar.high, bar.low, bar.close, bar.vol] {
                 mix(value.to_bits());
             }

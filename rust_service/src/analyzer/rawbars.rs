@@ -54,6 +54,11 @@ pub fn build_raw_bars(
         .as_ref()
         .ok_or_else(|| AnalysisError::invalid_request("market series is missing"))?;
 
+    // 本函数是公开 API，调用方未必先走 validate_series_lengths；
+    // 这里补一次（幂等，仅 6 次长度比较），避免越界索引。
+    super::validate_series_lengths(request.data_len, series)?;
+    // window_start 由 window_start_of 产生时必 <= data_len，直接调用则可能越界。
+    let window_start = window_start.min(request.data_len as usize);
     let mut bars = Vec::with_capacity(request.data_len as usize - window_start);
     for i in window_start..request.data_len as usize {
         let dt = resolve_bar_datetime(i, &series.dt_unix_ms, freq)?;

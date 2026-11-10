@@ -11,6 +11,12 @@ use crate::cache::CacheKey;
 use crate::proto::analysis::{AnalysisSnapshot, AnalyzeRequest, AnalyzeResponse};
 use crate::state::AppState;
 
+/// 取互斥锁：临界区只有 map 操作、无跨字段不变量，中毒后数据仍可用；
+/// 恢复而不是 unwrap，避免一次 panic 把整个服务钉死。
+fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// 等待同数据段（CacheKey）的在途分析完成并重查缓存。
 ///
 /// 在途分析方无论成败都会 `notify_waiters()`；这里用 15s 超时兜底，
@@ -26,7 +32,7 @@ async fn await_in_flight_result(
     // 的丢失唤醒（Notify::notify_waiters 不保存许可）。
     loop {
         let notify = {
-            let guard = state.in_flight.lock().unwrap();
+            let guard = lock(&state.in_flight);
             guard.get(cache_key).cloned()
         };
         let Some(notify) = notify else {
@@ -34,7 +40,7 @@ async fn await_in_flight_result(
         };
         let mut notified = Box::pin(notify.notified());
         let wait_for_this = {
-            let guard = state.in_flight.lock().unwrap();
+            let guard = lock(&state.in_flight);
             match guard.get(cache_key) {
                 // owner 已移除登记：无论它写入缓存与否，都重新查缓存。
                 None => break,
@@ -67,7 +73,7 @@ async fn await_in_flight_result(
 
 /// 撤销本请求的在途登记并唤醒所有等待者（无论分析成败，防止等待方挂死）。
 fn release_in_flight(state: &Arc<AppState>, cache_key: &CacheKey) {
-    if let Some(notify) = state.in_flight.lock().unwrap().remove(cache_key) {
+    if let Some(notify) = lock(&state.in_flight).remove(cache_key) {
         notify.notify_waiters();
     }
 }
@@ -84,21 +90,12 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
         input_hash: request.input_hash,
         data_len: request.data_len,
         freq_hint: request.freq_hint.clone(),
-        max_bi_num: if options.max_bi_num > 0 {
-            options.max_bi_num
-        } else {
-            state.config.max_bi_num
-        },
-        min_bi_len: if options.min_bi_len > 0 {
-            options.min_bi_len
-        } else {
-            state.config.min_bi_len
-        },
-        analysis_window: if options.analysis_window > 0 {
-            options.analysis_window
-        } else {
-            state.config.default_analysis_window
-        },
+        max_bi_num: analyzer::pick(options.max_bi_num, state.config.max_bi_num),
+        min_bi_len: analyzer::pick(options.min_bi_len, state.config.min_bi_len),
+        analysis_window: analyzer::pick(
+            options.analysis_window,
+            state.config.default_analysis_window,
+        ),
         requested_func_ids,
         include_objects: options.include_objects,
     };
@@ -125,9 +122,9 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
         // 原子 check-and-insert：谁先插入谁负责分析；失败者等待 owner，
         // 而不是在“key 已存在”时继续进入分析造成重复全量。
         {
-            let mut lock = state.in_flight.lock().unwrap();
-            if !lock.contains_key(&cache_key) {
-                lock.insert(cache_key.clone(), Arc::new(tokio::sync::Notify::new()));
+            let mut in_flight = lock(&state.in_flight);
+            if !in_flight.contains_key(&cache_key) {
+                in_flight.insert(cache_key.clone(), Arc::new(tokio::sync::Notify::new()));
                 registered = true;
             }
         }
@@ -173,14 +170,23 @@ pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<An
     // 5) 分析（CPU 密集）在阻塞线程池执行，不占用 runtime worker；
     //    开启增量时优先增量承接（前缀一致只演化新增 K 线，稳态 O(新增)），
     //    未命中回退全量；分析参数由请求 + 配置解析。
-    let analyze_request = request.clone();
+    let analyze_request = request;
     let analyze_state = state.clone();
     let analyze = tokio::task::spawn_blocking(move || -> Result<_> {
         let params = analyzer::AnalysisParams::from((&analyze_request, &analyze_state.config));
         analyze_snapshot(&analyze_request, &params, &analyze_state)
     })
-    .await
-    .map_err(|err| anyhow!("analysis task join failed: {err}"))?;
+    .await;
+    let analyze = match analyze {
+        Ok(result) => result,
+        Err(err) => {
+            // 分析线程 panic 也必须撤销在途登记，否则同 key 后续请求每次白等 30s。
+            if registered {
+                release_in_flight(state, &cache_key);
+            }
+            return Err(anyhow!("analysis task join failed: {err}"));
+        }
+    };
 
     let mut snapshot = match analyze {
         Ok((snapshot, is_full)) => {
@@ -277,18 +283,18 @@ fn analyze_snapshot(
     //    并发取出同一条目时后取者得到 None 走全量，放入总是完整状态。
     //    注意：take 的 MutexGuard 是临时值，必须独立成语句，否则其生命周期
     //    会延伸到整个 if-let（内部再 lock() 导致 std Mutex 自死锁）。
-    let taken = state.incremental.lock().unwrap().take(&key);
+    let taken = lock(&state.incremental).take(&key);
     if let Some(mut st) = taken {
         if st.accept(&window_bars, wants_signals) == AcceptOutcome::Served {
             let points = st.signals();
             let snapshot = analyzer::assemble_snapshot(
                 request, params, freq, max_bi_num, min_bi_len, &st.czsc, points,
             )?;
-            state.incremental.lock().unwrap().put(key.clone(), st);
+            lock(&state.incremental).put(key.clone(), st);
             return Ok((snapshot, false));
         }
         // 不适用：放回缓存（后续可承接的请求仍可复用）
-        state.incremental.lock().unwrap().put(key.clone(), st);
+        lock(&state.incremental).put(key.clone(), st);
     }
 
     // 2) 全量演化（首建或无法承接），同时建立增量状态供后续承接。
@@ -307,11 +313,7 @@ fn analyze_snapshot(
         &czsc,
         buy_sell_points,
     )?;
-    state
-        .incremental
-        .lock()
-        .unwrap()
-        .put(key, IncrementalState::new(window_bars, czsc, evaluator));
+    lock(&state.incremental).put(key, IncrementalState::new(window_bars, czsc, evaluator));
     Ok((snapshot, true))
 }
 

@@ -25,3 +25,31 @@ tdx_czsc — 原型/联调阶段：Windows 通达信 x64 + Rust `czsc-core` 分�
 - DLL 编译与全链路验证只能在真实 Windows x64 + 通达信环境进行；协议与 Rust 侧工作可跨平台。
 - 提交保持主题化（`rust_service: ...`、`bridge_dll: ...`、`docs: ...`）；当前阶段避免大范围重命名和在 DLL 侧引入大量新依赖。
 - 本仓库注释与文档使用中文，保持一致。
+
+<!-- gortex:communities:start -->
+## Community Skills
+
+| Area | Description | Explore |
+|------|-------------|---------|
+| Tests 4 Dirs | 107 symbols | `analyze(operation:"communities", id:"community-43")` |
+| Analyzer Cal Seg Sure | 106 symbols | `analyze(operation:"communities", id:"community-32")` |
+| Analyzer 1 Dirs Combine | 80 symbols | `analyze(operation:"communities", id:"community-42")` |
+| Analyzer 1 Dirs Analysiserror | 78 symbols | `analyze(operation:"communities", id:"community-28")` |
+| Bridge Dll Src 2 Dirs | 66 symbols | `analyze(operation:"communities", id:"community-3")` |
+| Analyzer 1 Dirs Accept | 54 symbols | `analyze(operation:"communities", id:"community-26")` |
+| Handlers 2 Dirs | 52 symbols | `analyze(operation:"communities", id:"community-47")` |
+| Analyzer Strictpivot | 40 symbols | `analyze(operation:"communities", id:"community-40")` |
+| Tests Run Shadow | 35 symbols | `analyze(operation:"communities", id:"community-51")` |
+| Analyzer Signalevaluator | 32 symbols | `analyze(operation:"communities", id:"community-37")` |
+| Analyzer Seg | 31 symbols | `analyze(operation:"communities", id:"community-41")` |
+| Analyzer Fx Mid Index | 27 symbols | `analyze(operation:"communities", id:"community-29")` |
+| Analyzer Build Channel | 26 symbols | `analyze(operation:"communities", id:"community-25")` |
+| Analyzer Pivot Edges Follow Trend | 24 symbols | `analyze(operation:"communities", id:"community-30")` |
+| Analyzer Build Snapshot Populates Core C | 21 symbols | `analyze(operation:"communities", id:"community-27")` |
+| Analyzer Build Strict Channel | 21 symbols | `analyze(operation:"communities", id:"community-24")` |
+| Rust Service Src 2 Dirs Appconfig | 20 symbols | `analyze(operation:"communities", id:"community-44")` |
+| Tests Build Zigzag | 20 symbols | `analyze(operation:"communities", id:"community-55")` |
+| Tests Common Analyze Request Ex | 19 symbols | `analyze(operation:"communities", id:"community-52")` |
+| Analyzer 1 Dirs Buysellpoint | 16 symbols | `analyze(operation:"communities", id:"community-35")` |
+
+<!-- gortex:communities:end -->

@@ -15,6 +15,7 @@ mod channels;
 mod error;
 mod incremental;
 mod objects;
+mod pivot_rules;
 mod pivots;
 mod rawbars;
 mod segs;

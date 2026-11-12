@@ -1,6 +1,7 @@
 #include "bridge_logging.h"
 
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -12,6 +13,10 @@
 
 namespace tdx_czsc {
 namespace {
+
+/// 单个日志文件上限；超过后轮转为 .1（只保留一份历史），
+/// 避免通达信长时间挂机把磁盘写满。
+constexpr std::uintmax_t kMaxLogBytes = 8ull * 1024 * 1024;
 
 std::mutex& LogMutex() {
     static std::mutex mutex;
@@ -80,6 +85,16 @@ std::string CurrentTimestamp() {
 void WriteLine(const char* level, const std::string& message) {
     std::lock_guard<std::mutex> lock(LogMutex());
     const std::string path = ResolveLogPath();
+    try {
+        if (std::filesystem::file_size(path) >= kMaxLogBytes) {
+            std::filesystem::path rotated = path;
+            rotated += ".1";
+            std::filesystem::remove(rotated);
+            std::filesystem::rename(path, rotated);
+        }
+    } catch (...) {
+        // 轮转失败不影响写日志本身
+    }
     std::ofstream out(path, std::ios::out | std::ios::app);
     if (!out.is_open()) {
         return;
@@ -91,6 +106,15 @@ void WriteLine(const char* level, const std::string& message) {
 }  // namespace
 
 void LogDebug(const std::string& message) {
+    // 热路径（每次公式调用都会记录）默认关闭，需要时设 TDX_CZSC_LOG_DEBUG=1。
+    static const bool enabled = [] {
+        char value[8]{};
+        const DWORD size = GetEnvironmentVariableA("TDX_CZSC_LOG_DEBUG", value, sizeof(value));
+        return size == 1 && value[0] == '1';
+    }();
+    if (!enabled) {
+        return;
+    }
     WriteLine("DEBUG", message);
 }
 

@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <deque>
+#include <exception>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -29,7 +30,7 @@ struct BridgeRuntime {
         : config(std::move(cfg)), cache(config.dll_cache_capacity), client(config) {}
 
     BridgeConfig config;
-    SnapshotCache cache{4};
+    SnapshotCache cache;
     BridgeIpcClient client{};
 
     // 量能缓存：段指纹 -> VOL 序列。跨公式共享（同一通达信进程），
@@ -89,11 +90,16 @@ void CacheVolume(uint64_t segment_key, std::vector<float> vol) {
     }
 }
 
-/// 查询某数据段的 VOL 序列；未命中返回 nullptr。
-const std::vector<float>* LookupVolume(uint64_t segment_key) {
+/// 拷贝出某数据段的 VOL 序列；未命中或长度不符返回 false。
+/// 必须在锁内完成拷贝：把缓存内部指针返回给锁外使用，并发的 CacheVolume 会使其悬垂。
+bool TryLookupVolume(uint64_t segment_key, std::size_t expected_size, std::vector<float>* out) {
     std::lock_guard<std::mutex> lock(Runtime().volume_cache_mutex);
     const auto it = Runtime().volume_cache.find(segment_key);
-    return it == Runtime().volume_cache.end() ? nullptr : &it->second;
+    if (it == Runtime().volume_cache.end() || it->second.size() != expected_size) {
+        return false;
+    }
+    *out = it->second;
+    return true;
 }
 
 uint64_t ComputeInputHash(int data_len,
@@ -149,9 +155,9 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
     // 使带/不带量能的请求在 DLL 与服务端缓存中互不污染。
     if (data_len > 0) {
         const uint64_t segment_key = ComputeSegmentKey(data_len, in_high, in_low);
-        if (const std::vector<float>* cached_vol = LookupVolume(segment_key);
-            cached_vol != nullptr && cached_vol->size() == static_cast<size_t>(data_len)) {
-            request.vol = *cached_vol;
+        std::vector<float> cached_vol;
+        if (TryLookupVolume(segment_key, static_cast<std::size_t>(data_len), &cached_vol)) {
+            request.vol = std::move(cached_vol);
             request.input_hash = ComputeInputHash(data_len, in_high, in_low, in_close,
                                                   request.vol.data(),
                                                   static_cast<int>(request.vol.size()));
@@ -171,7 +177,8 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
     }
 
     // 调试: 记录通达信传入的数据长度与首尾价格, 用于排查对齐/偏移问题
-    LogInfo("BuildRequest func_id=" + std::to_string(func_id) + " data_len=" +
+    // 热路径日志：每次通道调用都会走到，默认只写文件不产生额外开销由 LogDebug 门控。
+    LogDebug("BuildRequest func_id=" + std::to_string(func_id) + " data_len=" +
             std::to_string(data_len) + " first_close=" +
             (data_len > 0 ? std::to_string(in_close[0]) : "?") + " last_close=" +
             (data_len > 0 ? std::to_string(in_close[data_len - 1]) : "?") +
@@ -199,14 +206,6 @@ CacheKey BuildCacheKey(const AnalyzeRequestCpp& request) {
     key.min_bi_len = request.options.min_bi_len;
     key.analysis_window = request.options.analysis_window;
     return key;
-}
-
-void FillDebugFallback(uint32_t func_id, int data_len, float* out_values) {
-    if (func_id == 902) {
-        std::fill(out_values, out_values + data_len, 0.0f);
-        return;
-    }
-    FillZeros(data_len, out_values);
 }
 
 #define DECLARE_FUNC_WRAPPER(ID)                                      \
@@ -297,33 +296,48 @@ void HandleFunc(uint32_t func_id,
         return;
     }
 
-    FillZeros(data_len, out_values);
+    // 异常不得穿透 DLL 边界：任何失败（含 bad_alloc）都必须降级为零输出。
+    try {
+        FillZeros(data_len, out_values);
 
-    if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
-        LogWarn("HandleFunc received null input series pointer");
-        return;
+        if (in_high == nullptr || in_low == nullptr || in_close == nullptr) {
+            LogWarn("HandleFunc received null input series pointer");
+            return;
+        }
+
+        const AnalyzeRequestCpp request = BuildRequest(func_id, data_len, in_high, in_low, in_close);
+        const CacheKey cache_key = BuildCacheKey(request);
+
+        AnalysisSnapshotCpp snapshot;
+        if (Runtime().cache.TryGet(cache_key, &snapshot)) {
+            snapshot.service_cache_hit = true;
+            FillFromSnapshot(snapshot, func_id, data_len, out_values);
+            return;
+        }
+
+        std::string error;
+        if (Runtime().client.Analyze(request, &snapshot, &error)) {
+            Runtime().cache.Put(cache_key, snapshot);
+            FillFromSnapshot(snapshot, func_id, data_len, out_values);
+            return;
+        }
+
+        LogError("BridgeIpcClient::Analyze failed for func_id=" + std::to_string(func_id) +
+                 " data_len=" + std::to_string(data_len) + " error=" + error);
+        FillZeros(data_len, out_values);
+    } catch (const std::exception& e) {
+        try {
+            LogError(std::string("HandleFunc exception: ") + e.what());
+        } catch (...) {
+        }
+        FillZeros(data_len, out_values);
+    } catch (...) {
+        try {
+            LogError("HandleFunc caught unknown exception");
+        } catch (...) {
+        }
+        FillZeros(data_len, out_values);
     }
-
-    const AnalyzeRequestCpp request = BuildRequest(func_id, data_len, in_high, in_low, in_close);
-    const CacheKey cache_key = BuildCacheKey(request);
-
-    AnalysisSnapshotCpp snapshot;
-    if (Runtime().cache.TryGet(cache_key, &snapshot)) {
-        snapshot.service_cache_hit = true;
-        FillFromSnapshot(snapshot, func_id, data_len, out_values);
-        return;
-    }
-
-    std::string error;
-    if (Runtime().client.Analyze(request, &snapshot, &error)) {
-        Runtime().cache.Put(cache_key, snapshot);
-        FillFromSnapshot(snapshot, func_id, data_len, out_values);
-        return;
-    }
-
-    LogError("BridgeIpcClient::Analyze failed for func_id=" + std::to_string(func_id) +
-             " data_len=" + std::to_string(data_len) + " error=" + error);
-    FillDebugFallback(func_id, data_len, out_values);
 }
 
 PluginTCalcFuncInfo* GetFunctionRegistry() {

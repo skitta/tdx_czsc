@@ -16,7 +16,7 @@
 //! 同一条目时，后取者得到 `None` 走全量；先后放回的顺序不影响正确性
 //! （`accept` 按"缺失即补"全量追加，且放入总是完整的新状态）。
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
 use czsc_core::analyze::CZSC;
 use czsc_core::objects::bar::RawBar;
@@ -211,12 +211,16 @@ impl IncrementalStore {
         }
     }
 
+    /// 锁中毒按既有策略恢复并记录日志（与 `AppState` 的 `in_flight` 一致）。
+    fn lock_cache(&self) -> MutexGuard<'_, IncrementalCache> {
+        self.cache.lock().unwrap_or_else(|poisoned| {
+            tracing::error!("incremental cache mutex poisoned; recovering");
+            poisoned.into_inner()
+        })
+    }
+
     pub(crate) fn lease(&self, key: IncrementalKey) -> IncrementalLease<'_> {
-        let state = self
-            .cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take(&key);
+        let state = self.lock_cache().take(&key);
         IncrementalLease {
             store: self,
             key,
@@ -251,11 +255,7 @@ impl<'a> IncrementalLease<'a> {
         let Some(state) = self.state.take() else {
             return;
         };
-        self.store
-            .cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .put(self.key.clone(), state);
+        self.store.lock_cache().put(self.key.clone(), state);
     }
 }
 

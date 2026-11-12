@@ -19,27 +19,12 @@ use chrono::NaiveDate;
 use chrono::NaiveDateTime;
 use prost::Message;
 
-use tdx_czsc_service::analyzer::build_snapshot_profiled;
+use tdx_czsc_service::analyzer::{
+    AnalysisWindow, ChannelBuilder, FreqHint, RawBarFactory, SignalAnalyzer, SnapshotAnalyzer,
+};
 use tdx_czsc_service::config::AppConfig;
 use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSeries};
 use tdx_czsc_service::state::AppState;
-
-const CHANNEL_NAMES: &[(u32, &str)] = &[
-    (101, "fx_top"),
-    (102, "fx_bottom"),
-    (201, "bi_points"),
-    (202, "bi_direction"),
-    (301, "zs_upper"),
-    (302, "zs_lower"),
-    (303, "zs_middle"),
-    (304, "zs_boundary"),
-    (401, "buy1"),
-    (402, "sell1"),
-    (403, "buy2"),
-    (404, "sell2"),
-    (405, "buy3"),
-    (406, "sell3"),
-];
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -73,7 +58,10 @@ fn main() -> Result<()> {
 
     let request = AnalyzeRequest {
         func_group: "single_level_structure".to_string(),
-        requested_func_ids: CHANNEL_NAMES.iter().map(|(id, _)| *id).collect(),
+        requested_func_ids: ChannelBuilder::specs()
+            .iter()
+            .map(|spec| spec.func_id())
+            .collect(),
         freq_hint,
         data_len: close,
         input_hash: 0xCAFEBABE,
@@ -90,25 +78,21 @@ fn main() -> Result<()> {
 
     let started = std::time::Instant::now();
     // 拆段计时: 定位分析耗时瓶颈
-    let window_start = tdx_czsc_service::analyzer::window_start_of(
-        close as usize,
-        request.options.as_ref().unwrap().analysis_window,
-    );
+    let window_start = AnalysisWindow::new(request.options.as_ref().unwrap().analysis_window)
+        .start(close as usize);
     let t0 = std::time::Instant::now();
-    let bars = tdx_czsc_service::analyzer::build_raw_bars(
-        &request,
-        tdx_czsc_service::analyzer::parse_freq(&request.freq_hint).expect("freq"),
-        window_start,
-        derive_volume_proxy,
-    )
-    .expect("bars");
+    let bars = RawBarFactory::new(&request, derive_volume_proxy)
+        .build(
+            FreqHint::new(&request.freq_hint).parse().expect("freq"),
+            window_start,
+        )
+        .expect("bars");
     let t1 = std::time::Instant::now();
     // 第 1 遍：直连演化剖面（不经 build_snapshot），供诊断"最后一笔详情"；
     // 注意：随后 build_snapshot_profiled 会再跑第 2 遍完整分析——
     // 因此主耗时数字以 build_snapshot_profiled 输出的剖面为准，
     // 本段只用于对照"纯演化"与"快照装配"的差异。
-    let (czsc, _points) =
-        tdx_czsc_service::analyzer::compute_buy_sell_points(&bars, 1000, min_bi_len);
+    let (czsc, _points) = SignalAnalyzer::new(&bars, 1000, min_bi_len).compute()?;
     let t2 = std::time::Instant::now();
     // 最后一笔详情: 检查 fx_a/fx_b 分型类型与位置
     {
@@ -156,9 +140,10 @@ fn main() -> Result<()> {
         t1 - t0,
         t2 - t1
     );
-    let params = tdx_czsc_service::analyzer::AnalysisParams::from((&request, &state.config));
+    let params = tdx_czsc_service::analyzer::AnalysisParams::from(state.config());
     let mut profile = tdx_czsc_service::analyzer::SnapshotProfile::default();
-    let snapshot = build_snapshot_profiled(&request, &params, Some(&mut profile))?;
+    let snapshot =
+        SnapshotAnalyzer::new(&params).build_snapshot_profiled(&request, Some(&mut profile))?;
     println!("build_snapshot 总耗时: {:?}", started.elapsed());
 
     // 阶段剖面（P1）：定位"演化之后"的通道/对象/编码成本
@@ -188,10 +173,14 @@ fn main() -> Result<()> {
     );
 
     println!("\n== 通道命中统计 ==");
-    for (func_id, name) in CHANNEL_NAMES {
-        if let Some(ch) = snapshot.channels.iter().find(|c| c.func_id == *func_id) {
+    for spec in ChannelBuilder::specs() {
+        if let Some(ch) = snapshot
+            .channels
+            .iter()
+            .find(|c| c.func_id == spec.func_id())
+        {
             let hits = ch.values.iter().filter(|v| v.abs() > f32::EPSILON).count();
-            println!("{func_id} {name:<12} 非零点: {hits}");
+            println!("{} {:<12} 非零点: {hits}", spec.func_id(), spec.name());
         }
     }
 

@@ -16,23 +16,33 @@
 //! 同一条目时，后取者得到 `None` 走全量；先后放回的顺序不影响正确性
 //! （`accept` 按"缺失即补"全量追加，且放入总是完整的新状态）。
 
-use std::collections::{HashMap, VecDeque};
+use std::sync::{Mutex, PoisonError};
 
 use czsc_core::analyze::CZSC;
 use czsc_core::objects::bar::RawBar;
 
 use super::signals::{BuySellPoint, SignalEvaluator};
+use crate::lru::Lru;
 
-/// 单根 K 线一致性判定（构造自同一 `build_raw_bars` 逻辑，f32→f64
+/// 单根 K 线一致性判定（构造自同一 `RawBarFactory` 逻辑，f32→f64
 /// 转换位级一致，逐字段精确比较即可）。
-fn same_bar(a: &RawBar, b: &RawBar) -> bool {
-    a.dt == b.dt
-        && a.open == b.open
-        && a.high == b.high
-        && a.low == b.low
-        && a.close == b.close
-        && a.vol == b.vol
-        && a.amount == b.amount
+///
+/// 外部 `RawBar` 未实现 `PartialEq`，比较语义由本 trait 承载，
+/// 避免模块级自由比较函数。
+pub(crate) trait BarIdentity {
+    fn same_bar(&self, other: &Self) -> bool;
+}
+
+impl BarIdentity for RawBar {
+    fn same_bar(&self, other: &Self) -> bool {
+        self.dt == other.dt
+            && self.open == other.open
+            && self.high == other.high
+            && self.low == other.low
+            && self.close == other.close
+            && self.vol == other.vol
+            && self.amount == other.amount
+    }
 }
 
 /// 增量承接结果。
@@ -91,7 +101,7 @@ impl IncrementalState {
         if !new_bars[..compare_len]
             .iter()
             .zip(&old[..compare_len])
-            .all(|(n, o)| same_bar(n, o))
+            .all(|(n, o)| n.same_bar(o))
         {
             return AcceptOutcome::NotApplicable;
         }
@@ -103,7 +113,7 @@ impl IncrementalState {
                 return AcceptOutcome::NotApplicable;
             }
             // 完全相同的序列：无需演化（快照缓存被逐出后仍可复用装配）。
-            if same_bar(&new_bars[new_len - 1], &old[old_len - 1]) {
+            if new_bars[new_len - 1].same_bar(&old[old_len - 1]) {
                 return AcceptOutcome::Served;
             }
             self.bars
@@ -152,16 +162,13 @@ pub(crate) struct IncrementalKey {
 /// 条目持有演化中的 CZSC（含完整窗口 K 线），容量需按内存敏感配置
 /// （`AppConfig::incremental_cache_capacity`，默认 8）。
 pub(crate) struct IncrementalCache {
-    capacity: usize,
-    order: VecDeque<IncrementalKey>,
-    entries: HashMap<IncrementalKey, IncrementalState>,
+    entries: Lru<IncrementalKey, IncrementalState>,
 }
 
 impl std::fmt::Debug for IncrementalCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // 条目内含不可 Debug 的演化状态（CZSC/信号评估器），只输出概要。
         f.debug_struct("IncrementalCache")
-            .field("capacity", &self.capacity)
             .field("len", &self.entries.len())
             .finish_non_exhaustive()
     }
@@ -170,52 +177,109 @@ impl std::fmt::Debug for IncrementalCache {
 impl IncrementalCache {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            capacity,
-            order: VecDeque::new(),
-            entries: HashMap::new(),
+            entries: Lru::new(capacity),
         }
     }
 
     /// 取出并移除指定键的条目（供调用方演化后放回）。
     pub(crate) fn take(&mut self, key: &IncrementalKey) -> Option<IncrementalState> {
-        let state = self.entries.remove(key)?;
-        self.order.retain(|k| k != key);
-        Some(state)
+        self.entries.remove(key)
     }
 
     pub(crate) fn put(&mut self, key: IncrementalKey, state: IncrementalState) {
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key.clone(), state);
-            self.order.retain(|k| k != &key);
-            self.order.push_back(key);
-            return;
-        }
-
-        if self.entries.len() >= self.capacity
-            && let Some(oldest) = self.order.pop_front()
-        {
-            self.entries.remove(&oldest);
-        }
-
-        self.order.push_back(key.clone());
         self.entries.insert(key, state);
+    }
+}
+
+/// 增量状态缓存的所有者：把锁限制在短暂的 `take/put` 区间内。
+pub(crate) struct IncrementalStore {
+    cache: Mutex<IncrementalCache>,
+}
+
+impl std::fmt::Debug for IncrementalStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncrementalStore")
+            .field("cache", &self.cache)
+            .finish_non_exhaustive()
+    }
+}
+
+impl IncrementalStore {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            cache: Mutex::new(IncrementalCache::new(capacity)),
+        }
+    }
+
+    pub(crate) fn lease(&self, key: IncrementalKey) -> IncrementalLease<'_> {
+        let state = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take(&key);
+        IncrementalLease {
+            store: self,
+            key,
+            state,
+        }
+    }
+}
+
+/// 一次增量承接的租约：演化期间不持锁，成功 `commit` 才写回。
+#[must_use = "未 commit 的 IncrementalLease 会丢弃增量状态"]
+pub(crate) struct IncrementalLease<'a> {
+    store: &'a IncrementalStore,
+    key: IncrementalKey,
+    state: Option<IncrementalState>,
+}
+
+impl<'a> IncrementalLease<'a> {
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> Option<&IncrementalState> {
+        self.state.as_ref()
+    }
+
+    pub(crate) fn state_mut(&mut self) -> Option<&mut IncrementalState> {
+        self.state.as_mut()
+    }
+
+    pub(crate) fn replace(&mut self, state: IncrementalState) {
+        self.state = Some(state);
+    }
+
+    pub(crate) fn commit(mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        self.store
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .put(self.key.clone(), state);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analyzer::build_raw_bars;
+    use crate::analyzer::RawBarFactory;
     use crate::analyzer::fixtures::sample_request;
     use czsc_core::objects::freq::Freq;
 
     fn sample_bars() -> Vec<RawBar> {
         let request = sample_request(true);
-        build_raw_bars(&request, Freq::F30, 0, true).expect("bars should build")
+        RawBarFactory::new(&request, true)
+            .build(Freq::F30, 0)
+            .expect("bars should build")
+    }
+
+    fn evolve(bars: &[RawBar], wants_signals: bool) -> (CZSC, Option<SignalEvaluator>) {
+        let outcome = super::super::signals::EvolutionEngine::new(bars, 50, 3, wants_signals).run();
+        (outcome.czsc, outcome.evaluator)
     }
 
     fn full_points(bars: &[RawBar]) -> (CZSC, Vec<BuySellPoint>) {
-        let (czsc, mut ev) = super::super::signals::evolve_bars(bars, 50, 3, true);
+        let (czsc, mut ev) = evolve(bars, true);
         let points = ev.as_mut().expect("evaluator").finalize_points(&czsc);
         (czsc, points)
     }
@@ -226,7 +290,7 @@ mod tests {
         let bars = sample_bars();
         let (full_czsc, full_points) = full_points(&bars);
 
-        let (czsc, evaluator) = super::super::signals::evolve_bars(&bars[..20], 50, 3, true);
+        let (czsc, evaluator) = evolve(&bars[..20], true);
         let mut state = IncrementalState::new(bars[..20].to_vec(), czsc, evaluator);
         for end in (20..bars.len() + 9).step_by(9) {
             let end = end.min(bars.len());
@@ -254,7 +318,7 @@ mod tests {
         let bars = sample_bars();
         let (_, full_points) = full_points(&bars);
 
-        let (czsc, evaluator) = super::super::signals::evolve_bars(&bars[..20], 50, 3, true);
+        let (czsc, evaluator) = evolve(&bars[..20], true);
         let mut state = IncrementalState::new(bars[..20].to_vec(), czsc, evaluator);
         // 交替：结构-only（wants_signals=false）与信号请求
         for (end, wants) in [(30, false), (40, true), (50, false), (bars.len(), true)] {
@@ -281,7 +345,7 @@ mod tests {
 
         let (_, full_points) = full_points(&perturbed);
 
-        let (czsc, evaluator) = super::super::signals::evolve_bars(&bars, 50, 3, true);
+        let (czsc, evaluator) = evolve(&bars, true);
         let mut state = IncrementalState::new(bars.to_vec(), czsc, evaluator);
         assert_eq!(state.accept(&perturbed, true), AcceptOutcome::Served);
         assert_eq!(state.signals().len(), full_points.len());
@@ -295,7 +359,7 @@ mod tests {
         let last = replaced.last_mut().unwrap();
         last.dt += chrono::Duration::days(1);
 
-        let (czsc, evaluator) = super::super::signals::evolve_bars(&bars, 50, 3, true);
+        let (czsc, evaluator) = evolve(&bars, true);
         let state = IncrementalState::new(bars.to_vec(), czsc, evaluator);
         let mut s = state;
         assert_eq!(s.accept(&replaced, true), AcceptOutcome::NotApplicable);
@@ -308,7 +372,7 @@ mod tests {
         let mut modified = bars.clone();
         modified[10].close += 0.5;
 
-        let (czsc, evaluator) = super::super::signals::evolve_bars(&bars, 50, 3, true);
+        let (czsc, evaluator) = evolve(&bars, true);
         let state = IncrementalState::new(bars.to_vec(), czsc, evaluator);
         let mut s = state;
         let bars_before = s.bars.len();
@@ -324,7 +388,7 @@ mod tests {
     #[test]
     fn signals_request_without_evaluator_rejected() {
         let bars = sample_bars();
-        let (czsc, evaluator) = super::super::signals::evolve_bars(&bars, 50, 3, false);
+        let (czsc, evaluator) = evolve(&bars, false);
         assert!(evaluator.is_none());
         let mut state = IncrementalState::new(bars.to_vec(), czsc, evaluator);
         assert_eq!(state.accept(&bars, true), AcceptOutcome::NotApplicable);
@@ -343,7 +407,7 @@ mod tests {
             analysis_window: n,
         };
         let mk = |_n: u32| {
-            let (czsc, evaluator) = super::super::signals::evolve_bars(&bars, 50, 3, false);
+            let (czsc, evaluator) = evolve(&bars, false);
             IncrementalState::new(bars.to_vec(), czsc, evaluator)
         };
         cache.put(key(1), mk(1));
@@ -354,5 +418,52 @@ mod tests {
         assert!(cache.take(&key(2)).is_none(), "取出后条目移除");
         cache.put(key(2), mk(2));
         assert!(cache.take(&key(2)).is_some());
+    }
+
+    #[test]
+    fn lease_commit_persists_and_drop_discards() {
+        let bars = sample_bars();
+        let store = IncrementalStore::new(2);
+        let key = IncrementalKey {
+            freq_hint: "F30".to_string(),
+            max_bi_num: 50,
+            min_bi_len: 3,
+            analysis_window: 0,
+        };
+        let mk_state = || {
+            let (czsc, evaluator) = evolve(&bars, false);
+            IncrementalState::new(bars.to_vec(), czsc, evaluator)
+        };
+
+        let mut lease = store.lease(key.clone());
+        assert!(lease.state().is_none());
+        lease.replace(mk_state());
+        lease.commit();
+
+        let taken = store.lease(key.clone());
+        assert!(taken.state().is_some());
+        drop(taken);
+        assert!(
+            store.lease(key).state().is_none(),
+            "未 commit 的租约必须丢弃状态"
+        );
+    }
+
+    #[test]
+    fn store_recovers_from_poisoned_lock() {
+        let store = IncrementalStore::new(1);
+        let key = IncrementalKey {
+            freq_hint: "F30".to_string(),
+            max_bi_num: 50,
+            min_bi_len: 3,
+            analysis_window: 0,
+        };
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.cache.lock().expect("lock");
+            panic!("poison incremental store");
+        }));
+        assert!(poisoned.is_err());
+        assert!(store.lease(key).state().is_none());
     }
 }

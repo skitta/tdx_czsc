@@ -16,7 +16,7 @@ use czsc_signals::cxt::{cxt_second_bs_v230320, cxt_third_bs_v230318};
 use czsc_signals::params::ParamView;
 use czsc_signals::types::TaCache;
 use serde_json::Value;
-use tdx_czsc_service::analyzer::{MaSeriesCache, second_bs_fast, third_bs_fast};
+use tdx_czsc_service::analyzer::{FastSignalEngine, MaSeriesCache};
 
 mod common;
 use common::load_raw_bars;
@@ -34,7 +34,7 @@ fn assert_parity(czsc: &CZSC, orig_ta: &mut TaCache, fast_ma: &mut MaSeriesCache
     let view1 = ParamView::new(&params);
     let orig2 = cxt_second_bs_v230320(czsc, &view1, orig_ta);
     let view2 = ParamView::new(&params);
-    let fast2 = second_bs_fast(czsc, &view2, fast_ma);
+    let fast2 = FastSignalEngine::new(fast_ma).second(czsc, &view2);
     assert_eq!(
         signal_strings(&orig2),
         signal_strings(&fast2),
@@ -44,7 +44,7 @@ fn assert_parity(czsc: &CZSC, orig_ta: &mut TaCache, fast_ma: &mut MaSeriesCache
     let view3 = ParamView::new(&params);
     let orig3 = cxt_third_bs_v230318(czsc, &view3, orig_ta);
     let view4 = ParamView::new(&params);
-    let fast3 = third_bs_fast(czsc, &view4, fast_ma);
+    let fast3 = FastSignalEngine::new(fast_ma).third(czsc, &view4);
     assert_eq!(
         signal_strings(&orig3),
         signal_strings(&fast3),

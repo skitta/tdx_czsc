@@ -46,10 +46,14 @@ use czsc_signals::cxt::{cxt_first_buy_v221126, cxt_first_sell_v221126};
 use czsc_signals::params::ParamView;
 use czsc_signals::types::TaCache;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::proto::analysis::SignalKind;
-pub use fast::{MaSeriesCache, second_bs_fast, third_bs_fast};
+
+use super::error::AnalysisError;
+use super::objects::FxAnchor;
+pub use fast::MaSeriesCache;
+use fast::{second_bs_fast, third_bs_fast};
 
 mod fast {
     //! 快速信号路径（P1）：`cxt_second_bs_V230320` / `cxt_third_bs_V230318`
@@ -81,6 +85,7 @@ mod fast {
     }
 
     /// MA 缓存 + 单轮快照重算缓存（对齐 `ma_snapshot_value` 的 overrides）。
+    #[derive(Default)]
     pub struct MaSeriesCache {
         series: HashMap<(String, usize), MaSeries>,
         snapshot_overrides: HashMap<i32, f64>,
@@ -88,16 +93,7 @@ mod fast {
 
     impl MaSeriesCache {
         pub fn new() -> Self {
-            Self {
-                series: HashMap::new(),
-                snapshot_overrides: HashMap::new(),
-            }
-        }
-    }
-
-    impl Default for MaSeriesCache {
-        fn default() -> Self {
-            Self::new()
+            Self::default()
         }
     }
 
@@ -311,7 +307,11 @@ mod fast {
     }
 
     /// 快速实现：`cxt_second_bs_V230320`（均线辅助二买/二卖，末 5 笔）。
-    pub fn second_bs_fast(c: &CZSC, params: &ParamView, ma: &mut MaSeriesCache) -> Vec<Signal> {
+    pub(super) fn second_bs_fast(
+        c: &CZSC,
+        params: &ParamView,
+        ma: &mut MaSeriesCache,
+    ) -> Vec<Signal> {
         let di = get_usize_param(params, "di", 1);
         let timeperiod = get_usize_param(params, "timeperiod", 21);
         let ma_type = params.str("ma_type", "SMA").to_uppercase();
@@ -367,7 +367,11 @@ mod fast {
     }
 
     /// 快速实现：`cxt_third_bs_V230318`（均线辅助三买/三卖，末 5 笔中枢）。
-    pub fn third_bs_fast(c: &CZSC, params: &ParamView, ma: &mut MaSeriesCache) -> Vec<Signal> {
+    pub(super) fn third_bs_fast(
+        c: &CZSC,
+        params: &ParamView,
+        ma: &mut MaSeriesCache,
+    ) -> Vec<Signal> {
         let di = get_usize_param(params, "di", 1);
         let timeperiod = get_usize_param(params, "timeperiod", 34);
         let ma_type = params.str("ma_type", "SMA").to_uppercase();
@@ -468,6 +472,12 @@ struct SignalSpec {
     func: SpecFunc,
 }
 
+impl SignalSpec {
+    fn hits(&self, signal: &Signal) -> bool {
+        signal.value().split('_').next() == Some(self.hit_value)
+    }
+}
+
 const SIGNAL_SPECS: [SignalSpec; 6] = [
     SignalSpec {
         func_id: 401,
@@ -560,8 +570,8 @@ impl BuySellState {
 /// 缠论关联、TaCache）。
 ///
 /// 增量路径复用：新 K 线到来时先 `czsc.update_bar` 再 `observe(&czsc)`，
-/// 演化序列与全量 `compute_buy_sell_points` 逐 bar 完全一致（见
-/// `evolve_bars`）；`finalize_points` 产出当前确认的买卖点，评估器保留
+/// 演化序列与全量 `SignalAnalyzer::compute` 逐 bar 完全一致（见
+/// `EvolutionEngine::run`）；`finalize_points` 产出当前确认的买卖点，评估器保留
 /// 在状态中供后续演化继续，避免全窗口重放。
 pub(crate) struct SignalEvaluator {
     cache: TaCache,
@@ -599,7 +609,7 @@ impl SignalEvaluator {
                 || czsc
                     .bi_list
                     .iter()
-                    .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.anchor.index));
+                    .any(|bi| bi.fx_b.mid_index() == Some(p.anchor.index));
             if anchor_stable {
                 if self.bs_state.commit_allowed(p.func_id, p.anchor.index) {
                     self.bs_state.record(p.func_id, p.anchor.index);
@@ -620,7 +630,7 @@ impl SignalEvaluator {
     /// CZSC 演化一步（`update_bar`）后调用：按笔结构指纹去重评估。
     /// 笔结构不变时跳过全部信号函数（避免对每根 K 线都跑 6 个函数）。
     pub(crate) fn observe(&mut self, czsc: &CZSC) {
-        let state = bi_state_fingerprint(czsc);
+        let state = Self::bi_state_fingerprint(czsc);
         if self.last_bi_state == Some(state) {
             return;
         }
@@ -636,10 +646,10 @@ impl SignalEvaluator {
             let signal = match spec.func {
                 SpecFunc::Original(func) => func(czsc, &view, &mut self.cache)
                     .into_iter()
-                    .find(|s| signal_hits(s, spec.hit_value)),
+                    .find(|s| spec.hits(s)),
                 SpecFunc::Fast(func) => func(czsc, &view, &mut self.ma_fast)
                     .into_iter()
-                    .find(|s| signal_hits(s, spec.hit_value)),
+                    .find(|s| spec.hits(s)),
             };
             let current_hit = signal.as_ref().map(|_| spec.hit_value);
             if current_hit == self.prev_hit[i] {
@@ -649,7 +659,7 @@ impl SignalEvaluator {
             let Some(signal) = signal else {
                 continue;
             };
-            let Some(anchor) = latest_bi_end_anchor(czsc) else {
+            let Some(anchor) = Anchor::latest_bi_end(czsc) else {
                 continue;
             };
             self.pending.push(PendingPoint {
@@ -660,6 +670,18 @@ impl SignalEvaluator {
                 label: signal.to_string(),
             });
         }
+    }
+
+    /// 笔结构指纹：(笔数量, 最后一笔端点分型中间 K 线 id)。
+    /// 两者都不变时已完成笔序列完全一致，信号不会变化。
+    fn bi_state_fingerprint(czsc: &CZSC) -> (usize, i32) {
+        let last_fx_b_id = czsc
+            .bi_list
+            .last()
+            .and_then(|bi| bi.fx_b.elements.get(1))
+            .map(|bar| bar.id)
+            .unwrap_or(-1);
+        (czsc.bi_list.len(), last_fx_b_id)
     }
 
     /// 产出当前确认的买卖点（幂等）：末尾提交挂起信号、孤儿点过滤、同锚点去重。
@@ -674,112 +696,148 @@ impl SignalEvaluator {
         // 只保留锚定在最终可见笔端点上的点：演化早期形成的笔可能因 max_bi_num
         // 上限被清理（图上无对应笔结构），其买卖点一并丢弃，避免成为"孤儿点"。
         // （评估器内保留原始点集，后续 observe 继续演化，一致性由最终过滤保证。）
-        let mut points = self.points.clone();
         let final_bis = czsc.get_finished_bis();
-        points.retain(|p| {
-            final_bis
-                .iter()
-                .any(|bi| super::objects::fx_mid_index(&bi.fx_b) == Some(p.index))
-        });
+        let final_anchors: HashSet<usize> = final_bis
+            .iter()
+            .filter_map(|bi| bi.fx_b.mid_index())
+            .collect();
+        let mut points: Vec<_> = self
+            .points
+            .iter()
+            .filter(|p| final_anchors.contains(&p.index))
+            .cloned()
+            .collect();
 
         // 同一锚点上多个信号同时命中时，只保留优先级最高的一个（func_id 最小）。
-        let mut best_by_anchor: Vec<BuySellPoint> = Vec::new();
-        for point in points {
-            if let Some(existing) = best_by_anchor.iter_mut().find(|p| p.index == point.index) {
-                if point.func_id < existing.func_id {
-                    *existing = point;
-                }
-            } else {
-                best_by_anchor.push(point);
-            }
-        }
-        best_by_anchor.sort_by_key(|p| p.index);
-        best_by_anchor
+        points.sort_unstable_by_key(|p| (p.index, p.func_id));
+        points.dedup_by_key(|p| p.index);
+        points
     }
 }
 
-/// 全量演化核心：逐根演化 CZSC，并在需要时同步信号评估器。
+/// 演化结果：终态 CZSC 与可选的信号评估器。
+pub(crate) struct EvolutionOutcome {
+    pub(crate) czsc: CZSC,
+    pub(crate) evaluator: Option<SignalEvaluator>,
+}
+
+/// 全量演化入口：一次逐 bar 演化，结构通道与信号通道共用终态。
 ///
 /// 增量路径与全量路径共用同一演化序列：增量只对新增 K 线继续
 /// `update_bar + observe`（见 `incremental.rs`），演化终态与全量一致。
 /// `bars` 必须非空（由调用方保证）。
-pub(crate) fn evolve_bars(
-    bars: &[RawBar],
+pub(crate) struct EvolutionEngine<'a> {
+    bars: &'a [RawBar],
     max_bi_num: usize,
     min_bi_len: usize,
     wants_signals: bool,
-) -> (CZSC, Option<SignalEvaluator>) {
-    evolve_bars_profiled(bars, max_bi_num, min_bi_len, wants_signals, None)
 }
 
-/// `evolve_bars` 的剖面版（P1-1）：分离"逐根 update_bar"与"信号评估
-/// observe"两段耗时，供 `SnapshotProfile` 细分（profile=None 时零开销，
-/// 行为与 `evolve_bars` 完全一致）。
-pub(crate) fn evolve_bars_profiled(
-    bars: &[RawBar],
-    max_bi_num: usize,
-    min_bi_len: usize,
-    wants_signals: bool,
-    mut profile: Option<&mut super::SnapshotProfile>,
-) -> (CZSC, Option<SignalEvaluator>) {
-    let tracking = profile.is_some();
-    let mut czsc = CZSC::new(vec![bars[0].clone()], max_bi_num, min_bi_len);
-    let mut evaluator = wants_signals.then(SignalEvaluator::new);
-    let t0 = std::time::Instant::now();
-    if let Some(ev) = evaluator.as_mut() {
-        ev.observe(&czsc);
-    }
-    if let Some(p) = profile.as_deref_mut() {
-        p.evolve_observe += t0.elapsed();
-    }
-    for bar in &bars[1..] {
-        let t1 = tracking.then(std::time::Instant::now);
-        czsc.update_bar(bar.clone());
-        if let (Some(p), Some(t1)) = (profile.as_deref_mut(), t1) {
-            p.evolve_update += t1.elapsed();
+impl<'a> EvolutionEngine<'a> {
+    pub(crate) fn new(
+        bars: &'a [RawBar],
+        max_bi_num: usize,
+        min_bi_len: usize,
+        wants_signals: bool,
+    ) -> Self {
+        Self {
+            bars,
+            max_bi_num,
+            min_bi_len,
+            wants_signals,
         }
-        let t2 = tracking.then(std::time::Instant::now);
+    }
+
+    pub(crate) fn run(self) -> EvolutionOutcome {
+        self.run_profiled(None)
+    }
+
+    /// 带剖面演化：分离“逐根 update_bar”与“信号评估 observe”两段耗时，
+    /// 供 `SnapshotProfile` 细分；`profile=None` 时行为与无剖面路径一致。
+    pub(crate) fn run_profiled(
+        self,
+        mut profile: Option<&mut super::snapshot::SnapshotProfile>,
+    ) -> EvolutionOutcome {
+        let tracking = profile.is_some();
+        let mut czsc = CZSC::new(vec![self.bars[0].clone()], self.max_bi_num, self.min_bi_len);
+        let mut evaluator = self.wants_signals.then(SignalEvaluator::new);
+        let t0 = std::time::Instant::now();
         if let Some(ev) = evaluator.as_mut() {
             ev.observe(&czsc);
         }
-        if let (Some(p), Some(t2)) = (profile.as_deref_mut(), t2) {
-            p.evolve_observe += t2.elapsed();
+        if let Some(p) = profile.as_deref_mut() {
+            p.evolve_observe += t0.elapsed();
         }
+        for bar in &self.bars[1..] {
+            let t1 = tracking.then(std::time::Instant::now);
+            czsc.update_bar(bar.clone());
+            if let (Some(p), Some(t1)) = (profile.as_deref_mut(), t1) {
+                p.evolve_update += t1.elapsed();
+            }
+            let t2 = tracking.then(std::time::Instant::now);
+            if let Some(ev) = evaluator.as_mut() {
+                ev.observe(&czsc);
+            }
+            if let (Some(p), Some(t2)) = (profile.as_deref_mut(), t2) {
+                p.evolve_observe += t2.elapsed();
+            }
+        }
+        EvolutionOutcome { czsc, evaluator }
     }
-    (czsc, evaluator)
 }
 
-pub fn compute_buy_sell_points(
-    bars: &[RawBar],
+/// 纯全量信号计算入口。
+pub struct SignalAnalyzer<'a> {
+    bars: &'a [RawBar],
     max_bi_num: usize,
     min_bi_len: usize,
-) -> (CZSC, Vec<BuySellPoint>) {
-    assert!(
-        !bars.is_empty(),
-        "compute_buy_sell_points requires non-empty bars"
-    );
-    let (czsc, mut evaluator) = evolve_bars(bars, max_bi_num, min_bi_len, true);
-    let points = evaluator
-        .as_mut()
-        .expect("wants_signals=true must create evaluator")
-        .finalize_points(&czsc);
-    (czsc, points)
 }
 
-/// 笔结构指纹：(笔数量, 最后一笔端点分型中间 K 线 id)。
-/// 两者都不变时已完成笔序列完全一致，信号不会变化。
-fn bi_state_fingerprint(czsc: &CZSC) -> (usize, i32) {
-    let last_fx_b_id = czsc
-        .bi_list
-        .last()
-        .and_then(|bi| bi.fx_b.elements.get(1))
-        .map(|bar| bar.id)
-        .unwrap_or(-1);
-    (czsc.bi_list.len(), last_fx_b_id)
+impl<'a> SignalAnalyzer<'a> {
+    pub fn new(bars: &'a [RawBar], max_bi_num: usize, min_bi_len: usize) -> Self {
+        Self {
+            bars,
+            max_bi_num,
+            min_bi_len,
+        }
+    }
+
+    pub fn compute(self) -> Result<(CZSC, Vec<BuySellPoint>), AnalysisError> {
+        if self.bars.is_empty() {
+            return Err(AnalysisError::invalid_request(
+                "signal analysis requires non-empty bars",
+            ));
+        }
+        let outcome = EvolutionEngine::new(self.bars, self.max_bi_num, self.min_bi_len, true).run();
+        let czsc = outcome.czsc;
+        let mut evaluator = outcome.evaluator;
+        let points = evaluator
+            .as_mut()
+            .ok_or_else(|| {
+                AnalysisError::invalid_request("wants_signals=true must create evaluator")
+            })?
+            .finalize_points(&czsc);
+        Ok((czsc, points))
+    }
 }
 
-fn signal_hits(signal: &Signal, hit_value: &str) -> bool {
-    signal.value().split('_').next() == Some(hit_value)
+/// 快速信号入口：复用调用方持有的 MA 缓存。
+pub struct FastSignalEngine<'a> {
+    cache: &'a mut MaSeriesCache,
+}
+
+impl<'a> FastSignalEngine<'a> {
+    pub fn new(cache: &'a mut MaSeriesCache) -> Self {
+        Self { cache }
+    }
+
+    pub fn second(&mut self, czsc: &CZSC, params: &ParamView) -> Vec<Signal> {
+        fast::second_bs_fast(czsc, params, self.cache)
+    }
+
+    pub fn third(&mut self, czsc: &CZSC, params: &ParamView) -> Vec<Signal> {
+        fast::third_bs_fast(czsc, params, self.cache)
+    }
 }
 
 struct Anchor {
@@ -787,18 +845,20 @@ struct Anchor {
     price: f64,
 }
 
-/// 最新完成笔的结束分型锚点。
-///
-/// 位置与分型/笔/中枢通道对齐：取分型**极值K线**（`dt == fx.dt`）所在的
-/// 索引，而不是 `fx_b.elements[1].id`（包含合并组的起点），否则买卖点会
-/// 画在笔端分型的合并组起点、看起来落在笔的中途。
-fn latest_bi_end_anchor(czsc: &CZSC) -> Option<Anchor> {
-    let bi = czsc.bi_list.last()?;
-    let index = super::objects::fx_mid_index(&bi.fx_b)?;
-    Some(Anchor {
-        index,
-        price: bi.fx_b.fx,
-    })
+impl Anchor {
+    /// 最新完成笔的结束分型锚点。
+    ///
+    /// 位置与分型/笔/中枢通道对齐：取分型**极值K线**（`dt == fx.dt`）所在的
+    /// 索引，而不是 `fx_b.elements[1].id`（包含合并组的起点），否则买卖点会
+    /// 画在笔端分型的合并组起点、看起来落在笔的中途。
+    fn latest_bi_end(czsc: &CZSC) -> Option<Self> {
+        let bi = czsc.bi_list.last()?;
+        let index = bi.fx_b.mid_index()?;
+        Some(Self {
+            index,
+            price: bi.fx_b.fx,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -810,8 +870,8 @@ mod tests {
         let s: Signal = "30分钟_D1B_BUY1_一买_13笔_任意_0"
             .parse()
             .expect("valid signal string");
-        assert!(signal_hits(&s, "一买"));
-        assert!(!signal_hits(&s, "一卖"));
+        assert!(SIGNAL_SPECS[0].hits(&s));
+        assert!(!SIGNAL_SPECS[1].hits(&s));
     }
 
     #[test]

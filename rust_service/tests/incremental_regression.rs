@@ -1,7 +1,7 @@
 //! 回归测试：增量分析（enable_incremental）与全量分析输出完全一致。
 //!
 //! 使用仓库内真实数据 tests/data/002340_day.csv（3933 根），全部走
-//! `handlers::analyze::handle` 端到端路径（AppState + 快照缓存 + 增量
+//! `Handlers::analyze` 端到端路径（AppState + 快照缓存 + 增量
 //! 状态缓存 + singleflight）：
 //!
 //! 场景：
@@ -17,7 +17,7 @@
 //! 语义保证：增量路径与全量路径共用同一演化核心（`evolve_bars`），
 //! 输出位级一致（通道 f32 逐值比较 + 信号点索引/通道/label 比较）。
 
-use tdx_czsc_service::handlers::analyze::handle;
+use tdx_czsc_service::handlers::Handlers;
 use tdx_czsc_service::proto::analysis::{AnalysisSnapshot, AnalyzeRequest};
 use tdx_czsc_service::state::AppState;
 
@@ -83,7 +83,10 @@ async fn analyze_once(
     state: &std::sync::Arc<AppState>,
     request: AnalyzeRequest,
 ) -> AnalysisSnapshot {
-    let resp = handle(state, request).await.expect("handle should succeed");
+    let resp = Handlers::new(state.clone())
+        .analyze(request)
+        .await
+        .expect("handle should succeed");
     resp.snapshot.expect("snapshot present")
 }
 
@@ -139,17 +142,9 @@ async fn growing_series_incremental_equals_full_analysis() {
     eprintln!("[timer] 增量承接(1500 根, 缓存命中) = {:?}", t.elapsed());
 
     assert_snapshots_equal(&full_snap, &inc_snap, "序列增长(全量窗口)");
+    assert_eq!(full_state.total_analyses(), 1, "独立全量只分析一次");
     assert_eq!(
-        full_state
-            .total_analyses
-            .load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "独立全量只分析一次"
-    );
-    assert_eq!(
-        inc_state
-            .total_analyses
-            .load(std::sync::atomic::Ordering::Relaxed),
+        inc_state.total_analyses(),
         1,
         "增量路径除首建外不得触发全量分析"
     );
@@ -214,9 +209,7 @@ async fn in_place_last_bar_update_equals_full_analysis() {
 
     assert_snapshots_equal(&full_snap, &inc_snap, "末笔原地更新");
     assert_eq!(
-        inc_state
-            .total_analyses
-            .load(std::sync::atomic::Ordering::Relaxed),
+        inc_state.total_analyses(),
         1,
         "原地更新必须走增量承接，不得全量重算"
     );
@@ -265,9 +258,7 @@ async fn tail_window_growth_falls_back_to_full_but_correct() {
 
     assert_snapshots_equal(&full_snap, &inc_snap, "尾窗口增长回退全量");
     assert_eq!(
-        inc_state
-            .total_analyses
-            .load(std::sync::atomic::Ordering::Relaxed),
+        inc_state.total_analyses(),
         2,
         "尾窗口平移时增量不适用，必须回退全量（首建 1 次 + 回退 1 次）"
     );

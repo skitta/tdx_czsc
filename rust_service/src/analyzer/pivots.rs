@@ -25,167 +25,159 @@ use czsc_core::objects::bi::BI;
 use czsc_core::objects::direction::Direction as CzscDirection;
 use czsc_core::objects::zs::ZS;
 
-use super::objects::{bi_end_index, bi_start_index};
+use super::objects::BiAnchor;
 use super::signals::BuySellPoint;
 
 /// 在原生 czsc 中枢（`get_zs_seq`）之上优化前端与后端。
-pub fn build_pivots(bis: &[BI]) -> Vec<ZS> {
-    let native = get_zs_seq(bis);
-
-    // 第一遍：前端优化 + 行情趋势链（方向按中枢高低位置递推）
-    let mut fronts: Vec<(ZS, CzscDirection)> = Vec::new();
-    let mut prev_zz: Option<f64> = None;
-    let mut prev_trend: Option<CzscDirection> = None;
-    for zs in &native {
-        // 行情方向：按中枢高低位置判定（当前中枢用原生中轴与前一中枢的
-        // 最终中轴比较；剔除进入笔对中轴影响很小，不影响方向判定）
-        let trend = match prev_zz {
-            None => {
-                if zs.zz > bis[0].fx_a.fx {
-                    CzscDirection::Up
-                } else {
-                    CzscDirection::Down
-                }
-            }
-            Some(prev) if zs.zz > prev => CzscDirection::Up,
-            Some(prev) if zs.zz < prev => CzscDirection::Down,
-            Some(_) => prev_trend.unwrap_or(CzscDirection::Up),
-        };
-        let Some(trimmed) = trim_pivot_front(zs, trend) else {
-            continue;
-        };
-        prev_zz = Some(trimmed.zz);
-        prev_trend = Some(trend);
-        fronts.push((trimmed, trend));
-    }
-
-    // 第二遍：后端优化（从后往前处理——需要后一保留中枢的起点判断相邻间隔，
-    // 倒序时 result 的最后一个即"后一中枢"，被剔除的中枢自动跳过）
-    let mut result: Vec<ZS> = Vec::new();
-    for (zs, trend) in fronts.into_iter().rev() {
-        let next_start = result.last().and_then(|p| bi_start_index(p.bis.first()));
-        let Some(trimmed) = trim_pivot_back(zs, trend, next_start) else {
-            continue;
-        };
-        result.push(trimmed);
-    }
-    result.reverse();
-    result
+pub struct PivotAnalyzer<'a> {
+    bis: &'a [BI],
 }
 
-/// 剔除中枢的进入/连接笔（前端），返回优化后的中枢。
-///
-/// 前端：首笔与趋势同向（= 进入/连接笔）时剔除；剔除后不足 3 笔不成中枢。
-/// 区间 [zd, zg] 由剔除后的前 3 笔重叠重新计算，前 3 笔无重叠则不成中枢。
-fn trim_pivot_front(zs: &ZS, trend: CzscDirection) -> Option<ZS> {
-    let mut bis: Vec<BI> = zs.bis.clone();
-    if bis.len() < 3 {
-        return None;
+impl<'a> PivotAnalyzer<'a> {
+    pub fn new(bis: &'a [BI]) -> Self {
+        Self { bis }
     }
-    // 前端：首笔与趋势同向 = 进入/连接笔，剔除
-    if bis[0].direction == trend {
-        bis.remove(0);
+
+    pub fn build(&self) -> Vec<ZS> {
+        let native = get_zs_seq(self.bis);
+
+        // 第一遍：前端优化 + 行情趋势链（方向按中枢高低位置递推）
+        let mut fronts: Vec<(ZS, CzscDirection)> = Vec::new();
+        let mut prev_zz: Option<f64> = None;
+        let mut prev_trend: Option<CzscDirection> = None;
+        for zs in &native {
+            // 行情方向：按中枢高低位置判定（当前中枢用原生中轴与前一中枢的
+            // 最终中轴比较；剔除进入笔对中轴影响很小，不影响方向判定）
+            let trend = match prev_zz {
+                None => {
+                    if zs.zz > self.bis[0].fx_a.fx {
+                        CzscDirection::Up
+                    } else {
+                        CzscDirection::Down
+                    }
+                }
+                Some(prev) if zs.zz > prev => CzscDirection::Up,
+                Some(prev) if zs.zz < prev => CzscDirection::Down,
+                Some(_) => prev_trend.unwrap_or(CzscDirection::Up),
+            };
+            let Some(trimmed) = self.trim_front(zs, trend) else {
+                continue;
+            };
+            prev_zz = Some(trimmed.zz);
+            prev_trend = Some(trend);
+            fronts.push((trimmed, trend));
+        }
+
+        // 第二遍：后端优化（从后往前处理——需要后一保留中枢的起点判断相邻间隔，
+        // 倒序时 result 的最后一个即"后一中枢"，被剔除的中枢自动跳过）
+        let mut result: Vec<ZS> = Vec::new();
+        for (zs, trend) in fronts.into_iter().rev() {
+            let next_start = result.last().and_then(|p| p.bis.first().start_index());
+            let Some(trimmed) = self.trim_back(zs, trend, next_start) else {
+                continue;
+            };
+            result.push(trimmed);
+        }
+        result.reverse();
+        result
+    }
+
+    /// 剔除中枢的进入/连接笔（前端），返回优化后的中枢。
+    fn trim_front(&self, zs: &ZS, trend: CzscDirection) -> Option<ZS> {
+        let mut bis: Vec<BI> = zs.bis.clone();
         if bis.len() < 3 {
             return None;
         }
-    }
-    // 区间 [zd, zg] = 前 3 笔的重叠（剔除进入笔后重新计算）
-    let zd = bis[..3]
-        .iter()
-        .map(|b| b.get_low())
-        .fold(f64::NEG_INFINITY, f64::max);
-    let zg = bis[..3]
-        .iter()
-        .map(|b| b.get_high())
-        .fold(f64::INFINITY, f64::min);
-    if zg < zd {
-        return None;
-    }
-    Some(ZS::new(bis))
-}
-
-/// 剔除中枢的离开笔（后端），返回优化后的中枢。
-///
-/// 规则一（末笔方向）：中枢最后一笔必须与行情趋势相反——上升行情最后一笔
-/// 向下、下跌行情最后一笔向上（与前端对称，中枢为奇数笔结构）；末笔与
-/// 趋势同向（离开笔）时剔除。
-///
-/// 规则二（相邻间隔）：前一个中枢后端与后一中枢前端至少间隔一笔，不得
-/// 共享端点。
-///
-/// 优先级：**前端优化优先于后端**。两端发生端点共享时，后中枢前端（首笔
-/// 方向规则）不可改动，由前中枢末端退回一笔（间隔规则）；退回后若末笔
-/// 方向与趋势同向，还需再退一笔（方向规则）——循环直至两条规则都满足，
-/// 或缩至最少 3 笔。缩到最少 3 笔仍无法同时满足两条规则的候选中枢整组
-/// 剔除（不绘制）。
-fn trim_pivot_back(zs: ZS, trend: CzscDirection, next_start: Option<usize>) -> Option<ZS> {
-    let mut bis = zs.bis;
-    loop {
-        if bis.len() <= 3 {
-            break;
+        // 前端：首笔与趋势同向 = 进入/连接笔，剔除
+        if bis[0].direction == trend {
+            bis.remove(0);
+            if bis.len() < 3 {
+                return None;
+            }
         }
-        let last = bis.last().unwrap();
-        // 规则二（间隔，优先级低于前端）：与后一中枢共享/相交端点时，
-        // 后中枢前端不动（前端优先），本中枢（前中枢）末端退回一笔
-        let shares = next_start.is_some_and(|s| bi_end_index(bis.last()).is_some_and(|e| e >= s));
-        // 规则一（方向）：退回后若末笔与趋势同向（离开笔），还需再退一笔
-        let wrong_dir = last.direction == trend;
-        if !shares && !wrong_dir {
-            break;
-        }
-        bis.pop();
-    }
-    if bis.len() < 3 {
-        return None;
-    }
-    let last = bis.last().unwrap();
-    if last.direction == trend
-        || next_start.is_some_and(|s| bi_end_index(bis.last()).is_some_and(|e| e >= s))
-    {
-        return None;
-    }
-    Some(ZS::new(bis))
-}
-
-/// 三买/三卖缠论严格化：**依附中枢，每个中枢最多一个三买（405）和一个三卖（406）**。
-///
-/// 三买/三卖按"锚点之前最近结束的中枢"归属（三买/三卖是中枢被突破/跌破后的
-/// 回抽确认点，出现在该中枢结束之后）；同一中枢的第二个同向点丢弃；锚点前
-/// 无任何已结束中枢的点（无法归属）也丢弃。
-pub(crate) fn strictize_third_bs_by_zs(points: &mut Vec<BuySellPoint>, pivots: &[ZS]) {
-    let mut seen_405: Vec<usize> = Vec::new();
-    let mut seen_406: Vec<usize> = Vec::new();
-    points.retain(|p| {
-        if p.func_id != 405 && p.func_id != 406 {
-            return true;
-        }
-        // 归属到锚点之前最近结束的中枢（用中枢组最后一笔终点）
-        let Some(zi) = pivots
+        // 区间 [zd, zg] = 前 3 笔的重叠（剔除进入笔后重新计算）
+        let zd = bis[..3]
             .iter()
-            .rposition(|zs| bi_end_index(zs.bis.last()).is_some_and(|e| e < p.index))
-        else {
-            return false;
-        };
-        if p.func_id == 405 {
-            if seen_405.contains(&zi) {
-                return false;
-            }
-            seen_405.push(zi);
-        } else {
-            if seen_406.contains(&zi) {
-                return false;
-            }
-            seen_406.push(zi);
+            .map(|b| b.get_low())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let zg = bis[..3]
+            .iter()
+            .map(|b| b.get_high())
+            .fold(f64::INFINITY, f64::min);
+        if zg < zd {
+            return None;
         }
-        true
-    });
+        Some(ZS::new(bis))
+    }
+
+    /// 剔除中枢的离开笔（后端），返回优化后的中枢。
+    fn trim_back(&self, zs: ZS, trend: CzscDirection, next_start: Option<usize>) -> Option<ZS> {
+        let mut bis = zs.bis;
+        loop {
+            if bis.len() <= 3 {
+                break;
+            }
+            let Some(last) = bis.last() else {
+                break;
+            };
+            // 规则二（间隔，优先级低于前端）：与后一中枢共享/相交端点时，
+            // 后中枢前端不动（前端优先），本中枢（前中枢）末端退回一笔
+            let shares = next_start.is_some_and(|s| bis.last().end_index().is_some_and(|e| e >= s));
+            // 规则一（方向）：退回后若末笔与趋势同向（离开笔），还需再退一笔
+            let wrong_dir = last.direction == trend;
+            if !shares && !wrong_dir {
+                break;
+            }
+            bis.pop();
+        }
+        if bis.len() < 3 {
+            return None;
+        }
+        let last = bis.last()?;
+        if last.direction == trend
+            || next_start.is_some_and(|s| bis.last().end_index().is_some_and(|e| e >= s))
+        {
+            return None;
+        }
+        Some(ZS::new(bis))
+    }
+
+    /// 三买/三卖缠论严格化：每个中枢最多一个三买（405）和一个三卖（406）。
+    pub(crate) fn strictize_third_points(points: &mut Vec<BuySellPoint>, pivots: &[ZS]) {
+        let mut seen_405: Vec<usize> = Vec::new();
+        let mut seen_406: Vec<usize> = Vec::new();
+        points.retain(|p| {
+            if p.func_id != 405 && p.func_id != 406 {
+                return true;
+            }
+            // 归属到锚点之前最近结束的中枢（用中枢组最后一笔终点）
+            let Some(zi) = pivots
+                .iter()
+                .rposition(|zs| zs.bis.last().end_index().is_some_and(|e| e < p.index))
+            else {
+                return false;
+            };
+            if p.func_id == 405 {
+                if seen_405.contains(&zi) {
+                    return false;
+                }
+                seen_405.push(zi);
+            } else {
+                if seen_406.contains(&zi) {
+                    return false;
+                }
+                seen_406.push(zi);
+            }
+            true
+        });
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::analyzer::fixtures::make_series_bi;
-    use crate::analyzer::objects::{bi_end_index, bi_start_index};
+    use crate::analyzer::objects::BiAnchor;
 
     /// 中枢前端/后端优化（原生 get_zs_seq + build_pivots 全链路）：
     /// - 前端：上升行情中枢第一笔向下、下跌行情第一笔向上；
@@ -218,7 +210,7 @@ mod tests {
             .enumerate()
             .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
             .collect();
-        let pivots = build_pivots(&bis);
+        let pivots = PivotAnalyzer::new(&bis).build();
         assert_eq!(pivots.len(), 2, "上涨场景应保留两个中枢");
         for (k, zs) in pivots.iter().enumerate() {
             assert_eq!(zs.bis.len(), 3, "中枢{k}应为奇数笔 3 笔结构");
@@ -249,8 +241,8 @@ mod tests {
         }
         // 相邻间隔：前中枢末笔终点下标 < 后中枢首笔起点下标（至少间隔一笔）
         assert!(
-            bi_end_index(pivots[0].bis.last()).unwrap()
-                < bi_start_index(pivots[1].bis.first()).unwrap(),
+            pivots[0].bis.last().end_index().unwrap()
+                < pivots[1].bis.first().start_index().unwrap(),
             "前中枢后端必须与后一中枢前端至少间隔一笔"
         );
 
@@ -272,7 +264,7 @@ mod tests {
             .enumerate()
             .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
             .collect();
-        let pivots = build_pivots(&bis);
+        let pivots = PivotAnalyzer::new(&bis).build();
         assert_eq!(pivots.len(), 2, "下跌场景应保留两个中枢");
         for (k, zs) in pivots.iter().enumerate() {
             assert_eq!(zs.bis.len(), 3, "中枢{k}应为奇数笔 3 笔结构");
@@ -289,8 +281,8 @@ mod tests {
         assert_eq!(pivots[0].bis[0].fx_a.fx, 10.0, "中枢 0 应从上涨笔 1 开始");
         assert_eq!(pivots[1].bis[0].fx_a.fx, 8.0, "中枢 1 应从上涨笔 5 开始");
         assert!(
-            bi_end_index(pivots[0].bis.last()).unwrap()
-                < bi_start_index(pivots[1].bis.first()).unwrap(),
+            pivots[0].bis.last().end_index().unwrap()
+                < pivots[1].bis.first().start_index().unwrap(),
             "前中枢后端必须与后一中枢前端至少间隔一笔"
         );
 
@@ -312,7 +304,7 @@ mod tests {
             .enumerate()
             .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
             .collect();
-        let pivots = build_pivots(&bis);
+        let pivots = PivotAnalyzer::new(&bis).build();
         assert_eq!(pivots.len(), 1, "破位中枢无法满足间隔规则应整组剔除");
         assert_eq!(
             pivots[0].sdir,
@@ -345,7 +337,7 @@ mod tests {
             .enumerate()
             .map(|(i, &(s, e))| make_series_bi(i as i64, s, e))
             .collect();
-        let pivots = build_pivots(&bis);
+        let pivots = PivotAnalyzer::new(&bis).build();
         assert_eq!(pivots.len(), 2, "深跌回踩场景应保留两个中枢");
         // 前中枢：先退间隔一笔（笔 5），再退方向一笔（笔 4），剩 [下,上,下]
         assert_eq!(
@@ -375,8 +367,8 @@ mod tests {
         );
         // 间隔：前中枢末笔终点（笔 3 终点）在笔 4/5 之后，与后中枢起点隔开
         assert!(
-            bi_end_index(pivots[0].bis.last()).unwrap()
-                < bi_start_index(pivots[1].bis.first()).unwrap(),
+            pivots[0].bis.last().end_index().unwrap()
+                < pivots[1].bis.first().start_index().unwrap(),
             "前中枢后端必须与后一中枢前端至少间隔一笔"
         );
     }

@@ -24,7 +24,7 @@ use czsc_core::objects::direction::Direction as CzscDirection;
 
 /// 识别出的段（线段）
 #[derive(Debug, Clone)]
-pub struct Segment {
+pub(crate) struct Segment {
     /// 段首笔在输入笔序列中的索引
     pub start_bi_idx: usize,
     /// 段末笔在输入笔序列中的索引
@@ -39,6 +39,26 @@ pub struct Segment {
 enum Dir {
     Up,
     Down,
+}
+
+impl Dir {
+    fn of(direction: CzscDirection) -> Self {
+        match direction {
+            CzscDirection::Up => Self::Up,
+            CzscDirection::Down => Self::Down,
+        }
+    }
+
+    fn of_bi(bi: &BI) -> Self {
+        Self::of(bi.direction)
+    }
+
+    fn reversed(self) -> Self {
+        match self {
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+        }
+    }
 }
 
 // 合并结果（对应 Vespa314 的包含判定返回值；`Combine` 变体命名与前者对齐，
@@ -57,24 +77,6 @@ enum FxType {
     Unknown,
     Top,
     Bottom,
-}
-
-fn dir_of(d: CzscDirection) -> Dir {
-    match d {
-        CzscDirection::Up => Dir::Up,
-        CzscDirection::Down => Dir::Down,
-    }
-}
-
-fn revert(d: Dir) -> Dir {
-    match d {
-        Dir::Up => Dir::Down,
-        Dir::Down => Dir::Up,
-    }
-}
-
-fn bi_dir(bi: &BI) -> Dir {
-    dir_of(bi.direction)
 }
 
 /// 特征序列元素：一个或多个同向反向笔按线段方向合并而成。
@@ -256,7 +258,7 @@ impl EigenFX {
 
     /// 加入一个反向笔；返回是否出现分型（线段终结候选）。
     fn add(&mut self, bi_idx: usize, bis: &[BI]) -> bool {
-        debug_assert!(bi_dir(&bis[bi_idx]) != self.dir);
+        debug_assert!(Dir::of_bi(&bis[bi_idx]) != self.dir);
         self.lst.push(bi_idx);
         if self.ele[0].is_none() {
             self.treat_first_ele(bi_idx, bis)
@@ -295,7 +297,7 @@ impl EigenFX {
 
     fn treat_third_ele(&mut self, bi_idx: usize, bis: &[BI]) -> bool {
         let allow_top_equal = if self.exclude_included {
-            if bi_dir(&bis[bi_idx]) == Dir::Down {
+            if Dir::of_bi(&bis[bi_idx]) == Dir::Down {
                 Some(1)
             } else {
                 Some(-1)
@@ -428,8 +430,8 @@ impl EigenFX {
         if begin_idx >= bis.len() {
             return None;
         }
-        let first_bi_dir = bi_dir(&bis[begin_idx]);
-        let mut egien_fx = EigenFX::new(revert(first_bi_dir), false);
+        let first_bi_dir = Dir::of_bi(&bis[begin_idx]);
+        let mut egien_fx = EigenFX::new(first_bi_dir.reversed(), false);
         let mut i = begin_idx;
         while i < bis.len() {
             let bi = &bis[i];
@@ -456,329 +458,353 @@ impl EigenFX {
     }
 }
 
-/// 在笔序列中识别段（对应 Vespa314 `CSegListChan` 的静态一次扫描）。
-pub fn build_segs(bis: &[BI]) -> Vec<Segment> {
-    let mut segs = Vec::new();
-    cal_seg_sure(bis, 0, &mut segs);
-    collect_left_seg(bis, &mut segs);
-    segs
+/// 段识别入口：对已完成的笔序列做一次静态扫描。
+pub(crate) struct SegmentAnalyzer<'a> {
+    bis: &'a [BI],
 }
 
-/// 从 `begin_idx` 开始扫描，找到第一处特征序列分型并确认/拒绝该线段；
-/// 确认后从线段终点之后继续递归扫描。
-fn cal_seg_sure(bis: &[BI], begin_idx: usize, segs: &mut Vec<Segment>) {
-    let mut up_eigen = EigenFX::new(Dir::Up, true);
-    let mut down_eigen = EigenFX::new(Dir::Down, true);
-    // 已确认的上一段方向；用于决定当前段只喂哪个特征序列
-    let mut last_seg_dir: Option<Dir> = segs.last().map(|s| dir_of(s.direction));
-    let mut i = begin_idx;
-    while i < bis.len() {
-        let bi = &bis[i];
-        let mut hit: Option<Dir> = None;
-        // 两分支方向条件（Down/Up）互斥，add 只在匹配分支被调用，
-        // 折叠 if 不改变短路与特征序列推进语义
-        if bi.direction == CzscDirection::Down
-            && last_seg_dir != Some(Dir::Up)
-            && up_eigen.add(i, bis)
-        {
-            hit = Some(Dir::Up);
-        } else if bi.direction == CzscDirection::Up
-            && last_seg_dir != Some(Dir::Down)
-            && down_eigen.add(i, bis)
-        {
-            hit = Some(Dir::Down);
-        }
+impl<'a> SegmentAnalyzer<'a> {
+    pub(crate) fn new(bis: &'a [BI]) -> Self {
+        Self { bis }
+    }
 
-        // 第一段方向确定：不要以谁先成为分型来决定（反例：US.EVRG）。
-        // 某个特征序列先凑齐两个元素时，预判第一段方向并停喂另一侧特征序列；
-        // 若随后该特征序列不足两个元素，则解除预判。
-        if segs.is_empty() {
-            if up_eigen.ele[1].is_some() && bi.direction == CzscDirection::Down {
-                last_seg_dir = Some(Dir::Down);
-                down_eigen.clear();
-            } else if down_eigen.ele[1].is_some() && bi.direction == CzscDirection::Up {
-                up_eigen.clear();
-                last_seg_dir = Some(Dir::Up);
-            }
-            // 两个分支都只做"解预判"且条件互斥，合并为单一条件
-            let retract = (up_eigen.ele[1].is_none()
-                && last_seg_dir == Some(Dir::Down)
-                && bi.direction == CzscDirection::Down)
-                || (down_eigen.ele[1].is_none()
-                    && last_seg_dir == Some(Dir::Up)
-                    && bi.direction == CzscDirection::Up);
-            if retract {
-                last_seg_dir = None;
-            }
-        }
-
-        if let Some(d) = hit {
-            let eigen = if d == Dir::Up { &up_eigen } else { &down_eigen };
-            treat_fx_eigen(bis, eigen, segs);
-            break;
-        }
-        i += 1;
+    pub(crate) fn build(&self) -> Vec<Segment> {
+        SegStateMachine::new(self.bis).scan()
     }
 }
 
-/// 处理特征序列分型：确认/拒绝一个线段终点，并继续扫描。
-fn treat_fx_eigen(bis: &[BI], fx_eigen: &EigenFX, segs: &mut Vec<Segment>) {
-    let test = fx_eigen.can_be_end(bis);
-    let end_bi_idx = fx_eigen.peak_bi_idx(bis);
-    match test {
-        Some(true) | None => {
-            let is_true = test == Some(true);
-            // czsc 的已完成笔全部视为"确定"，故 is_sure 仅取决于终结确认状态
-            if !add_new_seg(bis, end_bi_idx, is_true, segs) {
-                cal_seg_sure(bis, end_bi_idx + 1, segs);
-                return;
-            }
-            if is_true {
-                cal_seg_sure(bis, end_bi_idx + 1, segs);
-            }
-        }
-        Some(false) => {
-            // 缺口未确认：从第二特征元素首笔处重新扫描
-            let resume = fx_eigen.lst.get(1).copied().unwrap_or(end_bi_idx + 1);
-            cal_seg_sure(bis, resume, segs);
-        }
-    }
+/// 静态段扫描状态机（对应 Vespa314 `CSegListChan` 的静态一次扫描）。
+struct SegStateMachine<'a> {
+    bis: &'a [BI],
+    segs: Vec<Segment>,
 }
 
-/// 追加一个段：`start = 上一段末笔 + 1（或 0）`，`end = end_bi_idx`。
-///
-/// 校验失败（首段方向/数值异常）返回 false，调用方从 end_bi_idx+1 重新扫描。
-fn add_new_seg(bis: &[BI], end_bi_idx: usize, is_sure: bool, segs: &mut Vec<Segment>) -> bool {
-    // split_first_seg：窗口起点位于某段中间时，在首根确认段之前切出一段
-    if segs.is_empty() && end_bi_idx >= 3 {
-        let is_high = bis[end_bi_idx].direction == CzscDirection::Down;
-        if let Some(peak) = find_peak_bi_rev(bis, end_bi_idx - 3, is_high) {
-            let condition = if bis[peak].direction == CzscDirection::Up {
-                bis[peak].get_high() > bis[0].get_high() || peak == 0
-            } else {
-                bis[peak].get_low() < bis[0].get_low() || peak == 0
-            };
-            if condition {
-                try_add_new_seg(bis, peak, false, Some(dir_of(bis[peak].direction)), segs);
-                try_add_new_seg(bis, end_bi_idx, false, None, segs);
-                return true;
+impl<'a> SegStateMachine<'a> {
+    fn new(bis: &'a [BI]) -> Self {
+        Self {
+            bis,
+            segs: Vec::new(),
+        }
+    }
+
+    fn scan(mut self) -> Vec<Segment> {
+        self.cal_seg_sure(0);
+        self.collect_left_seg();
+        self.segs
+    }
+
+    fn cal_seg_sure(&mut self, begin_idx: usize) {
+        let bis = self.bis;
+        let mut up_eigen = EigenFX::new(Dir::Up, true);
+        let mut down_eigen = EigenFX::new(Dir::Down, true);
+        // 已确认的上一段方向；用于决定当前段只喂哪个特征序列
+        let mut last_seg_dir: Option<Dir> = self.segs.last().map(|s| Dir::of(s.direction));
+        let mut i = begin_idx;
+        while i < bis.len() {
+            let bi = &bis[i];
+            let mut hit: Option<Dir> = None;
+            // 两分支方向条件（Down/Up）互斥，add 只在匹配分支被调用，
+            // 折叠 if 不改变短路与特征序列推进语义
+            if bi.direction == CzscDirection::Down
+                && last_seg_dir != Some(Dir::Up)
+                && up_eigen.add(i, bis)
+            {
+                hit = Some(Dir::Up);
+            } else if bi.direction == CzscDirection::Up
+                && last_seg_dir != Some(Dir::Down)
+                && down_eigen.add(i, bis)
+            {
+                hit = Some(Dir::Down);
+            }
+
+            // 第一段方向确定：不要以谁先成为分型来决定（反例：US.EVRG）。
+            // 某个特征序列先凑齐两个元素时，预判第一段方向并停喂另一侧特征序列；
+            // 若随后该特征序列不足两个元素，则解除预判。
+            if self.segs.is_empty() {
+                if up_eigen.ele[1].is_some() && bi.direction == CzscDirection::Down {
+                    last_seg_dir = Some(Dir::Down);
+                    down_eigen.clear();
+                } else if down_eigen.ele[1].is_some() && bi.direction == CzscDirection::Up {
+                    up_eigen.clear();
+                    last_seg_dir = Some(Dir::Up);
+                }
+                // 两个分支都只做"解预判"且条件互斥，合并为单一条件
+                let retract = (up_eigen.ele[1].is_none()
+                    && last_seg_dir == Some(Dir::Down)
+                    && bi.direction == CzscDirection::Down)
+                    || (down_eigen.ele[1].is_none()
+                        && last_seg_dir == Some(Dir::Up)
+                        && bi.direction == CzscDirection::Up);
+                if retract {
+                    last_seg_dir = None;
+                }
+            }
+
+            if let Some(d) = hit {
+                let eigen = if d == Dir::Up { &up_eigen } else { &down_eigen };
+                self.treat_fx_eigen(eigen);
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    /// 处理特征序列分型：确认/拒绝一个线段终点，并继续扫描。
+    fn treat_fx_eigen(&mut self, fx_eigen: &EigenFX) {
+        let test = fx_eigen.can_be_end(self.bis);
+        let end_bi_idx = fx_eigen.peak_bi_idx(self.bis);
+        match test {
+            Some(true) | None => {
+                let is_true = test == Some(true);
+                // czsc 的已完成笔全部视为"确定"，故 is_sure 仅取决于终结确认状态
+                if !self.add_new_seg(end_bi_idx, is_true) {
+                    self.cal_seg_sure(end_bi_idx + 1);
+                    return;
+                }
+                if is_true {
+                    self.cal_seg_sure(end_bi_idx + 1);
+                }
+            }
+            Some(false) => {
+                // 缺口未确认：从第二特征元素首笔处重新扫描
+                let resume = fx_eigen.lst.get(1).copied().unwrap_or(end_bi_idx + 1);
+                self.cal_seg_sure(resume);
             }
         }
     }
 
-    let start_bi_idx = segs.last().map(|s| s.end_bi_idx + 1).unwrap_or(0);
-    if start_bi_idx > end_bi_idx {
-        return false;
-    }
-    try_add_new_seg(bis, end_bi_idx, is_sure, None, segs)
-}
+    /// 追加一个段：`start = 上一段末笔 + 1（或 0）`，`end = end_bi_idx`。
+    ///
+    /// 校验失败（首段方向/数值异常）返回 false，调用方从 end_bi_idx+1 重新扫描。
+    fn add_new_seg(&mut self, end_bi_idx: usize, is_sure: bool) -> bool {
+        // split_first_seg：窗口起点位于某段中间时，在首根确认段之前切出一段
+        if self.segs.is_empty() && end_bi_idx >= 3 {
+            let is_high = self.bis[end_bi_idx].direction == CzscDirection::Down;
+            if let Some(peak) = self.find_peak_bi_rev(end_bi_idx - 3, is_high) {
+                let condition = if self.bis[peak].direction == CzscDirection::Up {
+                    self.bis[peak].get_high() > self.bis[0].get_high() || peak == 0
+                } else {
+                    self.bis[peak].get_low() < self.bis[0].get_low() || peak == 0
+                };
+                if condition {
+                    self.try_add_new_seg(peak, false, Some(Dir::of_bi(&self.bis[peak])));
+                    self.try_add_new_seg(end_bi_idx, false, None);
+                    return true;
+                }
+            }
+        }
 
-fn try_add_new_seg(
-    bis: &[BI],
-    end_bi_idx: usize,
-    is_sure: bool,
-    seg_dir: Option<Dir>,
-    segs: &mut Vec<Segment>,
-) -> bool {
-    if end_bi_idx >= bis.len() {
-        return false;
-    }
-    let start_bi_idx = segs.last().map(|s| s.end_bi_idx + 1).unwrap_or(0);
-    if start_bi_idx > end_bi_idx {
-        return false;
-    }
-    let end_bi = &bis[end_bi_idx];
-    let direction = seg_dir.unwrap_or(dir_of(end_bi.direction));
-
-    let mut is_sure = is_sure;
-    // 线段至少 3 笔，否则降级为未确认
-    if end_bi_idx - start_bi_idx < 2 {
-        is_sure = false;
-    }
-    if is_sure {
-        // 缠论方向校验：上升线段起点低于终点、下降线段起点高于终点；
-        // 校验失败（如数据窗口从段中间开始）时放弃本段，由调用方重新扫描
-        let begin_val = bis[start_bi_idx].fx_a.fx;
-        let end_val = end_bi.fx_b.fx;
-        let ok = match direction {
-            Dir::Up => begin_val < end_val,
-            Dir::Down => begin_val > end_val,
-        };
-        if !ok {
+        let start_bi_idx = self.segs.last().map(|s| s.end_bi_idx + 1).unwrap_or(0);
+        if start_bi_idx > end_bi_idx {
             return false;
         }
+        self.try_add_new_seg(end_bi_idx, is_sure, None)
     }
 
-    segs.push(Segment {
-        start_bi_idx,
-        end_bi_idx,
-        direction: match direction {
-            Dir::Up => CzscDirection::Up,
-            Dir::Down => CzscDirection::Down,
-        },
-        is_sure,
-    });
-    true
-}
-
-/// 收集剩余未确认部分（对应 `CSegListComm::collect_left_seg`，left_method=peak）。
-fn collect_left_seg(bis: &[BI], segs: &mut Vec<Segment>) {
-    if segs.is_empty() {
-        collect_first_seg(bis, segs);
-    } else {
-        collect_segs(bis, segs);
-    }
-}
-
-/// 一个确认段都没有时：按窗口内最高/最低点切出首段（未确认），再收尾。
-fn collect_first_seg(bis: &[BI], segs: &mut Vec<Segment>) {
-    if bis.len() < 3 {
-        return;
-    }
-    let high = bis
-        .iter()
-        .map(|b| b.get_high())
-        .fold(f64::NEG_INFINITY, f64::max);
-    let low = bis
-        .iter()
-        .map(|b| b.get_low())
-        .fold(f64::INFINITY, f64::min);
-    let begin_val = bis[0].fx_a.fx;
-    if (high - begin_val).abs() >= (low - begin_val).abs() {
-        if let Some(peak) = find_peak_bi(bis, 0, bis.len(), true) {
-            try_add_new_seg(bis, peak, false, Some(Dir::Up), segs);
+    fn try_add_new_seg(&mut self, end_bi_idx: usize, is_sure: bool, seg_dir: Option<Dir>) -> bool {
+        if end_bi_idx >= self.bis.len() {
+            return false;
         }
-    } else if let Some(peak) = find_peak_bi(bis, 0, bis.len(), false) {
-        try_add_new_seg(bis, peak, false, Some(Dir::Down), segs);
-    }
-    collect_left_as_seg(bis, segs);
-}
-
-/// 已有一段确认段时：收集其后剩余部分（优先找转折峰值形成未确认段）。
-fn collect_segs(bis: &[BI], segs: &mut Vec<Segment>) {
-    let last_bi = bis.len() - 1;
-    let last_seg_end = segs.last().unwrap().end_bi_idx;
-    if last_bi - last_seg_end < 3 {
-        return;
-    }
-    let last_dir = segs.last().unwrap().direction;
-    let last_end_val = bis[last_seg_end].fx_b.fx;
-    let last_bi_val = bis[last_bi].fx_b.fx;
-    if last_dir == CzscDirection::Down && last_bi_val <= last_end_val {
-        if let Some(peak) = find_peak_bi(bis, last_seg_end + 3, bis.len(), true) {
-            try_add_new_seg(bis, peak, false, Some(Dir::Up), segs);
-            collect_left_seg(bis, segs);
+        let start_bi_idx = self.segs.last().map(|s| s.end_bi_idx + 1).unwrap_or(0);
+        if start_bi_idx > end_bi_idx {
+            return false;
         }
-    } else if last_dir == CzscDirection::Up && last_bi_val >= last_end_val {
-        if let Some(peak) = find_peak_bi(bis, last_seg_end + 3, bis.len(), false) {
-            try_add_new_seg(bis, peak, false, Some(Dir::Down), segs);
-            collect_left_seg(bis, segs);
+        let end_bi = &self.bis[end_bi_idx];
+        let direction = seg_dir.unwrap_or(Dir::of_bi(end_bi));
+
+        let mut is_sure = is_sure;
+        // 线段至少 3 笔，否则降级为未确认
+        if end_bi_idx - start_bi_idx < 2 {
+            is_sure = false;
         }
-    } else {
-        collect_left_seg_peak_method(bis, last_seg_end, segs);
-    }
-}
-
-fn collect_left_seg_peak_method(bis: &[BI], last_seg_end: usize, segs: &mut Vec<Segment>) {
-    let last_dir = segs.last().unwrap().direction;
-    let is_high = last_dir == CzscDirection::Down;
-    if let Some(peak) = find_peak_bi(bis, last_seg_end + 3, bis.len(), is_high)
-        && peak - last_seg_end >= 3
-    {
-        try_add_new_seg(
-            bis,
-            peak,
-            false,
-            Some(if is_high { Dir::Up } else { Dir::Down }),
-            segs,
-        );
-    }
-    collect_left_as_seg(bis, segs);
-}
-
-/// 把最后一段终点之后剩余的笔收为一段（未确认）。
-fn collect_left_as_seg(bis: &[BI], segs: &mut Vec<Segment>) {
-    let last_bi = bis.len() - 1;
-    let last_seg_end = segs.last().unwrap().end_bi_idx;
-    if last_seg_end + 1 >= bis.len() {
-        return;
-    }
-    let end_idx = if bis[last_seg_end].direction == bis[last_bi].direction {
-        last_bi - 1
-    } else {
-        last_bi
-    };
-    try_add_new_seg(bis, end_idx, false, None, segs);
-}
-
-/// 在 `[start, end)` 内正向找"峰值笔"（对应 `FindPeakBi`）：
-/// is_high=true 找向上笔中终点最高者（跳过其前前笔终点更高的非峰值笔）。
-fn find_peak_bi(bis: &[BI], start: usize, end: usize, is_high: bool) -> Option<usize> {
-    let mut peak_val = if is_high {
-        f64::NEG_INFINITY
-    } else {
-        f64::INFINITY
-    };
-    let mut peak_bi = None;
-    for i in start..end {
-        let bi = &bis[i];
-        let end_val = bi.fx_b.fx;
-        let candidate = if is_high {
-            bi.direction == CzscDirection::Up && end_val >= peak_val
-        } else {
-            bi.direction == CzscDirection::Down && end_val <= peak_val
-        };
-        if candidate {
-            let skip = i >= 2
-                && if is_high {
-                    bis[i - 2].fx_b.fx > end_val
-                } else {
-                    bis[i - 2].fx_b.fx < end_val
-                };
-            if !skip {
-                peak_val = end_val;
-                peak_bi = Some(i);
+        if is_sure {
+            // 缠论方向校验：上升线段起点低于终点、下降线段起点高于终点；
+            // 校验失败（如数据窗口从段中间开始）时放弃本段，由调用方重新扫描
+            let begin_val = self.bis[start_bi_idx].fx_a.fx;
+            let end_val = end_bi.fx_b.fx;
+            let ok = match direction {
+                Dir::Up => begin_val < end_val,
+                Dir::Down => begin_val > end_val,
+            };
+            if !ok {
+                return false;
             }
         }
-    }
-    peak_bi
-}
 
-/// 在 `[0..=max_idx]` 内反向找"峰值笔"（split_first_seg 用）。
-fn find_peak_bi_rev(bis: &[BI], max_idx: usize, is_high: bool) -> Option<usize> {
-    let mut peak_val = if is_high {
-        f64::NEG_INFINITY
-    } else {
-        f64::INFINITY
-    };
-    let mut peak_bi = None;
-    let mut i = max_idx;
-    loop {
-        let bi = &bis[i];
-        let end_val = bi.fx_b.fx;
-        let candidate = if is_high {
-            bi.direction == CzscDirection::Up && end_val >= peak_val
+        self.segs.push(Segment {
+            start_bi_idx,
+            end_bi_idx,
+            direction: match direction {
+                Dir::Up => CzscDirection::Up,
+                Dir::Down => CzscDirection::Down,
+            },
+            is_sure,
+        });
+        true
+    }
+
+    /// 收集剩余未确认部分（对应 `CSegListComm::collect_left_seg`，left_method=peak）。
+    fn collect_left_seg(&mut self) {
+        if self.segs.is_empty() {
+            self.collect_first_seg();
         } else {
-            bi.direction == CzscDirection::Down && end_val <= peak_val
+            self.collect_segs();
+        }
+    }
+
+    /// 一个确认段都没有时：按窗口内最高/最低点切出首段（未确认），再收尾。
+    fn collect_first_seg(&mut self) {
+        if self.bis.len() < 3 {
+            return;
+        }
+        let high = self
+            .bis
+            .iter()
+            .map(|b| b.get_high())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let low = self
+            .bis
+            .iter()
+            .map(|b| b.get_low())
+            .fold(f64::INFINITY, f64::min);
+        let begin_val = self.bis[0].fx_a.fx;
+        if (high - begin_val).abs() >= (low - begin_val).abs() {
+            if let Some(peak) = self.find_peak_bi(0, self.bis.len(), true) {
+                self.try_add_new_seg(peak, false, Some(Dir::Up));
+            }
+        } else if let Some(peak) = self.find_peak_bi(0, self.bis.len(), false) {
+            self.try_add_new_seg(peak, false, Some(Dir::Down));
+        }
+        self.collect_left_as_seg();
+    }
+
+    /// 已有一段确认段时：收集其后剩余部分（优先找转折峰值形成未确认段）。
+    fn collect_segs(&mut self) {
+        let last_bi = self.bis.len() - 1;
+        let Some((last_seg_end, last_dir)) = self.segs.last().map(|s| (s.end_bi_idx, s.direction))
+        else {
+            return;
         };
-        if candidate {
-            let skip = i >= 2
-                && if is_high {
-                    bis[i - 2].fx_b.fx > end_val
-                } else {
-                    bis[i - 2].fx_b.fx < end_val
-                };
-            if !skip {
-                peak_val = end_val;
-                peak_bi = Some(i);
+        if last_bi - last_seg_end < 3 {
+            return;
+        }
+        let last_end_val = self.bis[last_seg_end].fx_b.fx;
+        let last_bi_val = self.bis[last_bi].fx_b.fx;
+        if last_dir == CzscDirection::Down && last_bi_val <= last_end_val {
+            if let Some(peak) = self.find_peak_bi(last_seg_end + 3, self.bis.len(), true) {
+                self.try_add_new_seg(peak, false, Some(Dir::Up));
+                self.collect_left_seg();
+            }
+        } else if last_dir == CzscDirection::Up && last_bi_val >= last_end_val {
+            if let Some(peak) = self.find_peak_bi(last_seg_end + 3, self.bis.len(), false) {
+                self.try_add_new_seg(peak, false, Some(Dir::Down));
+                self.collect_left_seg();
+            }
+        } else {
+            self.collect_left_seg_peak_method();
+        }
+    }
+
+    fn collect_left_seg_peak_method(&mut self) {
+        let Some((last_seg_end, last_dir)) = self.segs.last().map(|s| (s.end_bi_idx, s.direction))
+        else {
+            return;
+        };
+        let is_high = last_dir == CzscDirection::Down;
+        if let Some(peak) = self.find_peak_bi(last_seg_end + 3, self.bis.len(), is_high)
+            && peak - last_seg_end >= 3
+        {
+            self.try_add_new_seg(peak, false, Some(if is_high { Dir::Up } else { Dir::Down }));
+        }
+        self.collect_left_as_seg();
+    }
+
+    /// 把最后一段终点之后剩余的笔收为一段（未确认）。
+    fn collect_left_as_seg(&mut self) {
+        let last_bi = self.bis.len() - 1;
+        let Some(last_seg_end) = self.segs.last().map(|s| s.end_bi_idx) else {
+            return;
+        };
+        if last_seg_end + 1 >= self.bis.len() {
+            return;
+        }
+        let end_idx = if self.bis[last_seg_end].direction == self.bis[last_bi].direction {
+            last_bi - 1
+        } else {
+            last_bi
+        };
+        self.try_add_new_seg(end_idx, false, None);
+    }
+
+    /// 在 `[start, end)` 内正向找"峰值笔"（对应 `FindPeakBi`）：
+    /// is_high=true 找向上笔中终点最高者（跳过其前前笔终点更高的非峰值笔）。
+    fn find_peak_bi(&self, start: usize, end: usize, is_high: bool) -> Option<usize> {
+        let mut peak_val = if is_high {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let mut peak_bi = None;
+        for i in start..end {
+            let bi = &self.bis[i];
+            let end_val = bi.fx_b.fx;
+            let candidate = if is_high {
+                bi.direction == CzscDirection::Up && end_val >= peak_val
+            } else {
+                bi.direction == CzscDirection::Down && end_val <= peak_val
+            };
+            if candidate {
+                let skip = i >= 2
+                    && if is_high {
+                        self.bis[i - 2].fx_b.fx > end_val
+                    } else {
+                        self.bis[i - 2].fx_b.fx < end_val
+                    };
+                if !skip {
+                    peak_val = end_val;
+                    peak_bi = Some(i);
+                }
             }
         }
-        if i == 0 {
-            break;
-        }
-        i -= 1;
+        peak_bi
     }
-    peak_bi
+
+    /// 在 `[0..=max_idx]` 内反向找"峰值笔"（split_first_seg 用）。
+    fn find_peak_bi_rev(&self, max_idx: usize, is_high: bool) -> Option<usize> {
+        let mut peak_val = if is_high {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let mut peak_bi = None;
+        let mut i = max_idx;
+        loop {
+            let bi = &self.bis[i];
+            let end_val = bi.fx_b.fx;
+            let candidate = if is_high {
+                bi.direction == CzscDirection::Up && end_val >= peak_val
+            } else {
+                bi.direction == CzscDirection::Down && end_val <= peak_val
+            };
+            if candidate {
+                let skip = i >= 2
+                    && if is_high {
+                        self.bis[i - 2].fx_b.fx > end_val
+                    } else {
+                        self.bis[i - 2].fx_b.fx < end_val
+                    };
+                if !skip {
+                    peak_val = end_val;
+                    peak_bi = Some(i);
+                }
+            }
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        }
+        peak_bi
+    }
 }
 
 #[cfg(test)]
@@ -849,7 +875,7 @@ mod tests {
             })
             .collect();
         let bis = make_bis(&pts);
-        let segs = build_segs(&bis);
+        let segs = SegmentAnalyzer::new(&bis).build();
         assert!(!segs.is_empty());
         for seg in &segs {
             assert!(seg.end_bi_idx >= seg.start_bi_idx);
@@ -870,7 +896,7 @@ mod tests {
             (8.0, 16.0),
         ];
         let bis = make_bis(&pts);
-        let segs = build_segs(&bis);
+        let segs = SegmentAnalyzer::new(&bis).build();
         // 至少能跑通且段之间连续
         for w in segs.windows(2) {
             assert_eq!(w[1].start_bi_idx, w[0].end_bi_idx + 1);

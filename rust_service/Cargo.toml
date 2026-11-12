@@ -21,6 +21,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [build-dependencies]
 prost-build = "0.13"
 
+# 静态质量门槛：只开启对当前代码零噪声、且能真正防回归的 lint。
+# 不启用 clippy::pedantic——现存 300+ 条风格告警（文档句号、数值 cast 等）
+# 属于既有代码风格，不在本次范围内；`print_stdout` 也不启用，
+# 因为 `src/main.rs` 启动横幅与 examples 需要直接打印。
+#
+# `unsafe_code` 用 deny 而非 forbid：edition 2024 下 `std::env::set_var` 必须
+# unsafe，`build.rs` 为 PROTOC 兜底需要它（单点 allow，见 build.rs）。
+[lints.rust]
+unsafe_code = "deny"
+# 私有模块内残留的 `pub` 对外不可达，直接按 `pub(crate)` 收敛。
+unreachable_pub = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 # 发布构建（P2 实测决策）：thin LTO + codegen-units=1 仅带来 ~5% 性能
 # 增益但 release 构建时间约 10 倍（6m49s vs ~40s），负收益弃用；
 # strip=debuginfo 零编译代价，减小部署体积（保留）。

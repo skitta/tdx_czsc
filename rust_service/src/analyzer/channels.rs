@@ -1,8 +1,9 @@
-//! 输出通道构建：func_id → 对齐 DataLen 的 float[] 值序列（纯函数）。
+//! 输出通道构建：func_id → 对齐 DataLen 的 float[] 值序列。
 //!
-//! `build_channel` 是唯一入口：先解析通道元数据（kind/名称，单一映射表），
-//! 再按 func_id 分派到对应填充器。分型/笔/中枢/段/信号各通道的填充器
-//! 只做"对象 → 价格/方向值"的写入，不承担算法逻辑。
+//! [`CHANNEL_SPECS`] 是通道的唯一事实来源（编号、类型、诊断名、填充策略），
+//! [`ChannelBuilder`] 是唯一入口：解析出表项后按填充策略分派到对应填充器。
+//! 分型/笔/中枢/段/信号各通道的填充器只做"对象 → 价格/方向值"的写入，
+//! 不承担算法逻辑。
 
 use czsc_core::objects::bi::BI;
 use czsc_core::objects::direction::Direction as CzscDirection;
@@ -11,267 +12,534 @@ use czsc_core::objects::mark::Mark;
 use czsc_core::objects::zs::ZS;
 
 use super::error::AnalysisError;
-use super::objects::{fx_mid_index, zs_span};
+use super::objects::{FxAnchor, ZsAnchor};
 use super::segs::Segment;
 use super::signals::BuySellPoint;
 use crate::proto::analysis::{ChannelKind, ChannelSeries};
 
-/// 构建单个输出通道：func_id → kind/名称，并填充值序列。
-pub fn build_channel(
+/// 已校验的输出通道号，携带解析出的 [`ChannelSpec`]。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChannelFuncId {
+    id: u32,
+    spec: &'static ChannelSpec,
+}
+
+impl TryFrom<u32> for ChannelFuncId {
+    type Error = AnalysisError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        let spec = CHANNEL_SPECS
+            .iter()
+            .find(|spec| spec.func_id == value)
+            .ok_or_else(|| Self::unsupported(value))?;
+        Ok(Self { id: value, spec })
+    }
+}
+
+impl ChannelFuncId {
+    fn unsupported(func_id: u32) -> AnalysisError {
+        AnalysisError::invalid_request(format!("unsupported func_id: {func_id}"))
+    }
+}
+
+/// 输出通道的完整定义：编号、类型、诊断名与填充策略。
+#[derive(Debug)]
+pub struct ChannelSpec {
     func_id: u32,
+    kind: ChannelKind,
+    name: &'static str,
+    fill: Fill,
+}
+
+impl ChannelSpec {
+    /// 通道编号（即 DLL 侧请求的 func_id）。
+    pub fn func_id(&self) -> u32 {
+        self.func_id
+    }
+
+    /// 通道诊断名（仅用于日志与离线输出，不进入协议语义）。
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// 通道填充策略：[`ChannelBuilder::build`] 按此分派到对应填充器。
+#[derive(Debug)]
+enum Fill {
+    /// 顶/底分型极值K线处的分型价格（101/102）。
+    Fractal(Mark),
+    /// 每笔起止分型极值K线处的价格（201）。
+    BiPoints,
+    /// 笔覆盖区间填 ±1（202）。
+    BiDirection,
+    /// 已确认段端点的分型价格（203）。
+    SegPoints,
+    /// 已确认段覆盖区间填 ±1（204）。
+    SegDirection,
+    /// 中枢绘制区间填 `zg`/`zd`/`zz`（301~303）。
+    Zs(ZsField),
+    /// 中枢左右界标记 1/2/3（304）。
+    ZsBoundary,
+    /// 买卖点锚点价格，按 func_id 过滤（401~406）。
+    Signal,
+    /// 诊断通道，由 handlers 侧补丁填充（901~903）。
+    Debug,
+}
+
+/// 全量支持的通道表（唯一事实来源，按 func_id 升序）。
+///
+/// `handlers/version.rs` 的 `supported_func_ids`、DLL 侧约定与离线示例都以此
+/// 为准，统一通过 [`ChannelBuilder::specs`] 访问：新增通道只需在此加一行；
+/// 引入全新填充行为时，`build` 的 `Fill` 分派会因未覆盖而编译失败。
+const CHANNEL_SPECS: &[ChannelSpec] = &[
+    ChannelSpec {
+        func_id: 101,
+        kind: ChannelKind::ChannelFxTop,
+        name: "fx_top",
+        fill: Fill::Fractal(Mark::G),
+    },
+    ChannelSpec {
+        func_id: 102,
+        kind: ChannelKind::ChannelFxBottom,
+        name: "fx_bottom",
+        fill: Fill::Fractal(Mark::D),
+    },
+    ChannelSpec {
+        func_id: 201,
+        kind: ChannelKind::ChannelBiPoints,
+        name: "bi_points",
+        fill: Fill::BiPoints,
+    },
+    ChannelSpec {
+        func_id: 202,
+        kind: ChannelKind::ChannelBiDirection,
+        name: "bi_direction",
+        fill: Fill::BiDirection,
+    },
+    ChannelSpec {
+        func_id: 203,
+        kind: ChannelKind::ChannelSegPoints,
+        name: "seg_points",
+        fill: Fill::SegPoints,
+    },
+    ChannelSpec {
+        func_id: 204,
+        kind: ChannelKind::ChannelSegDirection,
+        name: "seg_direction",
+        fill: Fill::SegDirection,
+    },
+    ChannelSpec {
+        func_id: 301,
+        kind: ChannelKind::ChannelZsUpper,
+        name: "zs_upper",
+        fill: Fill::Zs(ZsField::Upper),
+    },
+    ChannelSpec {
+        func_id: 302,
+        kind: ChannelKind::ChannelZsLower,
+        name: "zs_lower",
+        fill: Fill::Zs(ZsField::Lower),
+    },
+    ChannelSpec {
+        func_id: 303,
+        kind: ChannelKind::ChannelZsMiddle,
+        name: "zs_middle",
+        fill: Fill::Zs(ZsField::Middle),
+    },
+    ChannelSpec {
+        func_id: 304,
+        kind: ChannelKind::ChannelZsBoundary,
+        name: "zs_boundary",
+        fill: Fill::ZsBoundary,
+    },
+    ChannelSpec {
+        func_id: 401,
+        kind: ChannelKind::ChannelBuy1,
+        name: "buy1",
+        fill: Fill::Signal,
+    },
+    ChannelSpec {
+        func_id: 402,
+        kind: ChannelKind::ChannelSell1,
+        name: "sell1",
+        fill: Fill::Signal,
+    },
+    ChannelSpec {
+        func_id: 403,
+        kind: ChannelKind::ChannelBuy2,
+        name: "buy2",
+        fill: Fill::Signal,
+    },
+    ChannelSpec {
+        func_id: 404,
+        kind: ChannelKind::ChannelSell2,
+        name: "sell2",
+        fill: Fill::Signal,
+    },
+    ChannelSpec {
+        func_id: 405,
+        kind: ChannelKind::ChannelBuy3,
+        name: "buy3",
+        fill: Fill::Signal,
+    },
+    ChannelSpec {
+        func_id: 406,
+        kind: ChannelKind::ChannelSell3,
+        name: "sell3",
+        fill: Fill::Signal,
+    },
+    ChannelSpec {
+        func_id: 901,
+        kind: ChannelKind::ChannelDebugCacheHit,
+        name: "debug_cache_hit",
+        fill: Fill::Debug,
+    },
+    ChannelSpec {
+        func_id: 902,
+        kind: ChannelKind::ChannelDebugServiceReady,
+        name: "debug_service_ready",
+        fill: Fill::Debug,
+    },
+    ChannelSpec {
+        func_id: 903,
+        kind: ChannelKind::ChannelDebugLatencyMs,
+        name: "debug_latency_ms",
+        fill: Fill::Debug,
+    },
+];
+
+/// 通道构建器：对象输入通过链式 setter 注入，`build`/`build_all` 负责分派。
+///
+/// 对 crate 外只暴露 [`ChannelBuilder::specs`]（通道表查询）；装配与构建
+/// 属于分析内部流程，可见性收在 `pub(crate)`。
+pub struct ChannelBuilder<'a> {
     data_len: usize,
-    fractals: &[FX],
-    finished_bis: &[BI],
-    pivots: &[ZS],
-    segs: &[Segment],
-    buy_sell_points: &[BuySellPoint],
-) -> Result<ChannelSeries, AnalysisError> {
-    let (kind, name) = resolve_channel_meta(func_id)?;
-    let mut values = vec![0.0; data_len];
-
-    match func_id {
-        101 => fill_fractal_channel(&mut values, fractals, Mark::G),
-        102 => fill_fractal_channel(&mut values, fractals, Mark::D),
-        201 => fill_bi_points_channel(&mut values, finished_bis),
-        202 => fill_bi_direction_channel(&mut values, finished_bis),
-        203 => fill_seg_points_channel(&mut values, finished_bis, segs),
-        204 => fill_seg_direction_channel(&mut values, finished_bis, segs),
-        301 => fill_zs_channel(&mut values, pivots, ZsField::Upper),
-        302 => fill_zs_channel(&mut values, pivots, ZsField::Lower),
-        303 => fill_zs_channel(&mut values, pivots, ZsField::Middle),
-        304 => fill_zs_boundary_channel(&mut values, pivots),
-        401..=406 => fill_signal_channel(&mut values, buy_sell_points, func_id),
-        901..=903 => {}
-        _ => return Err(unsupported_func_id(func_id)),
-    }
-
-    Ok(ChannelSeries {
-        func_id,
-        kind,
-        name: name.to_string(),
-        values,
-    })
+    fractals: &'a [FX],
+    finished_bis: &'a [BI],
+    pivots: &'a [ZS],
+    segs: &'a [Segment],
+    buy_sell_points: &'a [BuySellPoint],
 }
 
-fn unsupported_func_id(func_id: u32) -> AnalysisError {
-    AnalysisError::invalid_request(format!("unsupported func_id: {func_id}"))
-}
-
-/// 通道元数据单一映射表：func_id → (ChannelKind, 通道名)。
-///
-/// `handlers/version.rs` 的 supported_func_ids 与 DLL 侧约定都以这里为准，
-/// 新增通道只需改这一处。
-fn resolve_channel_meta(func_id: u32) -> Result<(i32, &'static str), AnalysisError> {
-    let kind = match func_id {
-        101 => (ChannelKind::ChannelFxTop as i32, "fx_top"),
-        102 => (ChannelKind::ChannelFxBottom as i32, "fx_bottom"),
-        201 => (ChannelKind::ChannelBiPoints as i32, "bi_points"),
-        202 => (ChannelKind::ChannelBiDirection as i32, "bi_direction"),
-        203 => (ChannelKind::ChannelSegPoints as i32, "seg_points"),
-        204 => (ChannelKind::ChannelSegDirection as i32, "seg_direction"),
-        301 => (ChannelKind::ChannelZsUpper as i32, "zs_upper"),
-        302 => (ChannelKind::ChannelZsLower as i32, "zs_lower"),
-        303 => (ChannelKind::ChannelZsMiddle as i32, "zs_middle"),
-        304 => (ChannelKind::ChannelZsBoundary as i32, "zs_boundary"),
-        401 => (ChannelKind::ChannelBuy1 as i32, "buy1"),
-        402 => (ChannelKind::ChannelSell1 as i32, "sell1"),
-        403 => (ChannelKind::ChannelBuy2 as i32, "buy2"),
-        404 => (ChannelKind::ChannelSell2 as i32, "sell2"),
-        405 => (ChannelKind::ChannelBuy3 as i32, "buy3"),
-        406 => (ChannelKind::ChannelSell3 as i32, "sell3"),
-        901 => (ChannelKind::ChannelDebugCacheHit as i32, "debug_cache_hit"),
-        902 => (
-            ChannelKind::ChannelDebugServiceReady as i32,
-            "debug_service_ready",
-        ),
-        903 => (
-            ChannelKind::ChannelDebugLatencyMs as i32,
-            "debug_latency_ms",
-        ),
-        _ => return Err(unsupported_func_id(func_id)),
-    };
-
-    Ok(kind)
-}
-
-fn fill_fractal_channel(values: &mut [f32], fractals: &[FX], mark: Mark) {
-    for fx in fractals.iter().filter(|fx| fx.mark == mark) {
-        if let Some(index) = fx_mid_index(fx) {
-            values[index] = fx.fx as f32;
+impl<'a> ChannelBuilder<'a> {
+    pub(crate) fn new(data_len: usize) -> Self {
+        Self {
+            data_len,
+            fractals: &[],
+            finished_bis: &[],
+            pivots: &[],
+            segs: &[],
+            buy_sell_points: &[],
         }
     }
-}
 
-fn fill_bi_points_channel(values: &mut [f32], finished_bis: &[BI]) {
-    for bi in finished_bis {
-        // 每笔的起止分型都标注（此前只填终点 fx_b，第一笔起点缺失）
-        if let Some(index) = fx_mid_index(&bi.fx_a) {
-            values[index] = bi.fx_a.fx as f32;
+    pub(crate) fn fractals(mut self, fractals: &'a [FX]) -> Self {
+        self.fractals = fractals;
+        self
+    }
+
+    pub(crate) fn bis(mut self, finished_bis: &'a [BI]) -> Self {
+        self.finished_bis = finished_bis;
+        self
+    }
+
+    pub(crate) fn pivots(mut self, pivots: &'a [ZS]) -> Self {
+        self.pivots = pivots;
+        self
+    }
+
+    pub(crate) fn segs(mut self, segs: &'a [Segment]) -> Self {
+        self.segs = segs;
+        self
+    }
+
+    pub(crate) fn buy_sell_points(mut self, buy_sell_points: &'a [BuySellPoint]) -> Self {
+        self.buy_sell_points = buy_sell_points;
+        self
+    }
+
+    /// 构建单个输出通道：func_id → 表项（类型/名称/填充策略），并填充值序列。
+    pub(crate) fn build(&self, func_id: u32) -> Result<ChannelSeries, AnalysisError> {
+        let func_id = ChannelFuncId::try_from(func_id)?;
+        let mut values = vec![0.0; self.data_len];
+        match &func_id.spec.fill {
+            Fill::Fractal(mark) => self.fill_fractal_channel(&mut values, mark)?,
+            Fill::BiPoints => self.fill_bi_points_channel(&mut values)?,
+            Fill::BiDirection => self.fill_bi_direction_channel(&mut values)?,
+            Fill::SegPoints => self.fill_seg_points_channel(&mut values)?,
+            Fill::SegDirection => self.fill_seg_direction_channel(&mut values)?,
+            Fill::Zs(field) => self.fill_zs_channel(&mut values, *field)?,
+            Fill::ZsBoundary => self.fill_zs_boundary_channel(&mut values)?,
+            Fill::Signal => self.fill_signal_channel(&mut values, func_id.id)?,
+            Fill::Debug => {}
         }
-        if let Some(index) = fx_mid_index(&bi.fx_b) {
-            values[index] = bi.fx_b.fx as f32;
+        Ok(ChannelSeries {
+            func_id: func_id.id,
+            kind: func_id.spec.kind as i32,
+            name: func_id.spec.name.to_owned(),
+            values,
+        })
+    }
+
+    /// 按输入顺序构建多个通道。
+    pub(crate) fn build_all(&self, func_ids: &[u32]) -> Result<Vec<ChannelSeries>, AnalysisError> {
+        func_ids.iter().map(|id| self.build(*id)).collect()
+    }
+
+    /// 全量通道表（唯一事实来源，按 func_id 升序）。
+    pub fn specs() -> &'static [ChannelSpec] {
+        CHANNEL_SPECS
+    }
+
+    fn fill_fractal_channel(&self, values: &mut [f32], mark: &Mark) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for fx in self.fractals.iter().filter(|fx| fx.mark == *mark) {
+            if let Some(index) = fx.mid_index() {
+                values.set(index, fx.fx as f32, "fractal")?;
+            }
         }
+        Ok(())
+    }
+
+    fn fill_bi_points_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for bi in self.finished_bis {
+            // 每笔的起止分型都标注（此前只填终点 fx_b，第一笔起点缺失）
+            if let Some(index) = bi.fx_a.mid_index() {
+                values.set(index, bi.fx_a.fx as f32, "bi start")?;
+            }
+            if let Some(index) = bi.fx_b.mid_index() {
+                values.set(index, bi.fx_b.fx as f32, "bi end")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_bi_direction_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for bi in self.finished_bis {
+            let Some(start) = bi.fx_a.mid_index() else {
+                continue;
+            };
+            let Some(end) = bi.fx_b.mid_index() else {
+                continue;
+            };
+
+            let direction = match bi.direction {
+                CzscDirection::Up => 1.0,
+                CzscDirection::Down => -1.0,
+            };
+
+            let (lower, upper) = (start.min(end), start.max(end));
+            values.fill_range(lower, upper, direction, "bi direction")?;
+        }
+        Ok(())
+    }
+
+    /// 段端点通道（203）：段首笔起点分型与末笔终点分型处输出分型价格。
+    ///
+    /// **只输出已确认段**（`is_sure=true`）；尾部未完成/暂定段不显示（图表上只画
+    /// 特征序列分型确认的段）。段的起止都是笔端点（分型位置），方向由 101/102
+    /// 顶底分型通道判定：向上段起点为底分型、终点为顶分型；向下段反之。相邻段
+    /// 共享端点分型，重复写值幂等。
+    fn fill_seg_points_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for seg in self.segs.iter().filter(|s| s.is_sure) {
+            if let Some(start_bi) = self.finished_bis.get(seg.start_bi_idx)
+                && let Some(index) = start_bi.fx_a.mid_index()
+            {
+                values.set(index, start_bi.fx_a.fx as f32, "seg start")?;
+            }
+            if let Some(end_bi) = self.finished_bis.get(seg.end_bi_idx)
+                && let Some(index) = end_bi.fx_b.mid_index()
+            {
+                values.set(index, end_bi.fx_b.fx as f32, "seg end")?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 段方向通道（204）：已确认段覆盖区间填 ±1（向上=1，向下=-1），
+    /// 与 202 笔向通道对称；未确认段不填。
+    fn fill_seg_direction_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for seg in self.segs.iter().filter(|s| s.is_sure) {
+            let Some(start_bi) = self.finished_bis.get(seg.start_bi_idx) else {
+                continue;
+            };
+            let Some(end_bi) = self.finished_bis.get(seg.end_bi_idx) else {
+                continue;
+            };
+            let Some(start) = start_bi.fx_a.mid_index() else {
+                continue;
+            };
+            let Some(end) = end_bi.fx_b.mid_index() else {
+                continue;
+            };
+
+            let direction = match seg.direction {
+                CzscDirection::Up => 1.0,
+                CzscDirection::Down => -1.0,
+            };
+            let (lower, upper) = (start.min(end), start.max(end));
+            values.fill_range(lower, upper, direction, "seg direction")?;
+        }
+        Ok(())
+    }
+
+    fn fill_zs_channel(&self, values: &mut [f32], field: ZsField) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for zs in self.pivots {
+            let Some((start, end)) = zs.span() else {
+                continue;
+            };
+
+            let pivot_value = match field {
+                ZsField::Upper => zs.zg,
+                ZsField::Lower => zs.zd,
+                ZsField::Middle => zs.zz,
+            } as f32;
+
+            values.fill_range(start, end, pivot_value, "zs")?;
+        }
+        Ok(())
+    }
+
+    /// 中枢边界标记：每个中枢绘制区间首 K 线输出 1（左界）、尾 K 线输出 2（右界），
+    /// 其余为 0；既是某中枢右界又是另一中枢左界的共享 K 线输出 3（左右界共用）。
+    fn fill_zs_boundary_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        let mut starts = Vec::with_capacity(self.pivots.len());
+        let mut ends = Vec::with_capacity(self.pivots.len());
+        for zs in self.pivots {
+            let Some((start, end)) = zs.span() else {
+                continue;
+            };
+            starts.push(start);
+            ends.push(end);
+        }
+
+        for &start in &starts {
+            values.set_if_in_bounds(start, 1.0);
+        }
+        for &end in &ends {
+            if let Some(current) = values.get(end) {
+                values.set_if_in_bounds(end, if current > 0.5 { 3.0 } else { 2.0 });
+            }
+        }
+        Ok(())
+    }
+
+    fn fill_signal_channel(&self, values: &mut [f32], func_id: u32) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for point in self.buy_sell_points.iter().filter(|p| p.func_id == func_id) {
+            values.set(point.index, point.price as f32, "signal")?;
+        }
+        Ok(())
     }
 }
 
-fn fill_bi_direction_channel(values: &mut [f32], finished_bis: &[BI]) {
-    for bi in finished_bis {
-        let Some(start) = fx_mid_index(&bi.fx_a) else {
-            continue;
-        };
-        let Some(end) = fx_mid_index(&bi.fx_b) else {
-            continue;
-        };
+/// 输出通道的零成本可写视图：集中处理越界错误，避免各填充器重复索引检查。
+#[repr(transparent)]
+struct ChannelBuf<'a>(&'a mut [f32]);
 
-        let direction = match bi.direction {
-            CzscDirection::Up => 1.0,
-            CzscDirection::Down => -1.0,
-        };
+impl<'a> ChannelBuf<'a> {
+    fn new(values: &'a mut [f32]) -> Self {
+        Self(values)
+    }
 
-        for value in &mut values[start.min(end)..=start.max(end)] {
-            *value = direction;
+    fn set(&mut self, index: usize, value: f32, channel: &str) -> Result<(), AnalysisError> {
+        let Some(slot) = self.0.get_mut(index) else {
+            return Err(Self::out_of_range(channel, index, self.0.len()));
+        };
+        *slot = value;
+        Ok(())
+    }
+
+    fn fill_range(
+        &mut self,
+        lower: usize,
+        upper: usize,
+        value: f32,
+        channel: &str,
+    ) -> Result<(), AnalysisError> {
+        if lower > upper || upper >= self.0.len() {
+            return Err(Self::out_of_range(channel, upper, self.0.len()));
         }
+        self.0[lower..=upper].fill(value);
+        Ok(())
+    }
+
+    fn get(&self, index: usize) -> Option<f32> {
+        self.0.get(index).copied()
+    }
+
+    fn set_if_in_bounds(&mut self, index: usize, value: f32) {
+        if let Some(slot) = self.0.get_mut(index) {
+            *slot = value;
+        }
+    }
+
+    fn out_of_range(channel: &str, index: usize, len: usize) -> AnalysisError {
+        AnalysisError::invalid_request(format!(
+            "{channel} index {index} out of range for channel length {len}"
+        ))
     }
 }
 
-/// 段端点通道（203）：段首笔起点分型与末笔终点分型处输出分型价格。
-///
-/// **只输出已确认段**（`is_sure=true`）；尾部未完成/暂定段不显示（图表上只画
-/// 特征序列分型确认的段）。段的起止都是笔端点（分型位置），方向由 101/102
-/// 顶底分型通道判定：向上段起点为底分型、终点为顶分型；向下段反之。相邻段
-/// 共享端点分型，重复写值幂等。
-fn fill_seg_points_channel(values: &mut [f32], finished_bis: &[BI], segs: &[Segment]) {
-    for seg in segs.iter().filter(|s| s.is_sure) {
-        if let Some(start_bi) = finished_bis.get(seg.start_bi_idx)
-            && let Some(index) = fx_mid_index(&start_bi.fx_a)
-        {
-            values[index] = start_bi.fx_a.fx as f32;
-        }
-        if let Some(end_bi) = finished_bis.get(seg.end_bi_idx)
-            && let Some(index) = fx_mid_index(&end_bi.fx_b)
-        {
-            values[index] = end_bi.fx_b.fx as f32;
-        }
-    }
-}
-
-/// 段方向通道（204）：已确认段覆盖区间填 ±1（向上=1，向下=-1），
-/// 与 202 笔向通道对称；未确认段不填。
-fn fill_seg_direction_channel(values: &mut [f32], finished_bis: &[BI], segs: &[Segment]) {
-    for seg in segs.iter().filter(|s| s.is_sure) {
-        let Some(start_bi) = finished_bis.get(seg.start_bi_idx) else {
-            continue;
-        };
-        let Some(end_bi) = finished_bis.get(seg.end_bi_idx) else {
-            continue;
-        };
-        let Some(start) = fx_mid_index(&start_bi.fx_a) else {
-            continue;
-        };
-        let Some(end) = fx_mid_index(&end_bi.fx_b) else {
-            continue;
-        };
-
-        let direction = match seg.direction {
-            CzscDirection::Up => 1.0,
-            CzscDirection::Down => -1.0,
-        };
-        for value in &mut values[start.min(end)..=start.max(end)] {
-            *value = direction;
-        }
-    }
-}
-
+#[derive(Debug, Clone, Copy)]
 enum ZsField {
     Upper,
     Lower,
     Middle,
 }
 
-fn fill_zs_channel(values: &mut [f32], pivots: &[ZS], field: ZsField) {
-    for zs in pivots {
-        let Some((start, end)) = zs_span(zs) else {
-            continue;
-        };
-
-        let pivot_value = match field {
-            ZsField::Upper => zs.zg,
-            ZsField::Lower => zs.zd,
-            ZsField::Middle => zs.zz,
-        } as f32;
-
-        for value in &mut values[start..=end] {
-            *value = pivot_value;
-        }
-    }
-}
-
-/// 中枢边界标记：每个中枢绘制区间首 K 线输出 1（左界）、尾 K 线输出 2（右界），
-/// 其余为 0；既是某中枢右界又是另一中枢左界的共享 K 线输出 3（左右界共用）。
-/// 配合 301/302 通道，通达信侧用折线/STICKLINE 画上/下沿与左右竖线，构成闭合
-/// 矩形，且相邻中枢之间互不连接。
-///
-/// 相邻中枢共享端点K线（前一中枢的右界 == 后一中枢的左界：原生贪心归属
-/// 下，离开/连接笔被并入后一中枢作为其第一笔）。若按顺序直接写值，共享
-/// K线会被后一中枢的左界 1 覆盖，前一中枢的右界 2 丢失，图上该中枢只剩
-/// 左侧竖线、没有上下边框和右边框。因此先统一写所有左界，再写右界；遇到
-/// 已写过左界的共享K线则升级为 3，公式层把 3 同时当作左界和右界。
-fn fill_zs_boundary_channel(values: &mut [f32], pivots: &[ZS]) {
-    let mut starts = Vec::with_capacity(pivots.len());
-    let mut ends = Vec::with_capacity(pivots.len());
-    for zs in pivots {
-        let Some((start, end)) = zs_span(zs) else {
-            continue;
-        };
-        starts.push(start);
-        ends.push(end);
-    }
-
-    for &start in &starts {
-        if start < values.len() {
-            values[start] = 1.0;
-        }
-    }
-    for &end in &ends {
-        if end < values.len() {
-            values[end] = if values[end] > 0.5 { 3.0 } else { 2.0 };
-        }
-    }
-}
-
-fn fill_signal_channel(values: &mut [f32], buy_sell_points: &[BuySellPoint], func_id: u32) {
-    for point in buy_sell_points.iter().filter(|p| p.func_id == func_id) {
-        values[point.index] = point.price as f32;
-    }
-}
-
-/// 全量支持的 func_id 列表（单一来源）。
-///
-/// `handlers/version.rs` 的 `supported_func_ids` 与 DLL 侧约定都以这里为准，
-/// 新增通道需同时更新 `resolve_channel_meta` 与本列表。
-pub(crate) const SUPPORTED_FUNC_IDS: &[u32] = &[
-    101, 102, 201, 202, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903,
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn channel_meta_covers_all_supported_ids() {
-        const ALL: [u32; 17] = [
-            101, 102, 201, 202, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903,
-        ];
-        for id in ALL {
-            assert!(resolve_channel_meta(id).is_ok(), "func_id {id} 缺元数据");
+    fn channel_specs_are_sorted_unique_and_resolvable() {
+        for pair in CHANNEL_SPECS.windows(2) {
+            assert!(pair[0].func_id < pair[1].func_id, "通道表需按 func_id 升序");
         }
-        assert!(resolve_channel_meta(999).is_err());
+        for spec in CHANNEL_SPECS {
+            let resolved = ChannelFuncId::try_from(spec.func_id).expect("表项应可解析");
+            assert_eq!(resolved.spec.func_id, spec.func_id);
+            assert_eq!(resolved.spec.kind, spec.kind);
+        }
+        assert!(ChannelFuncId::try_from(999).is_err());
     }
 
     #[test]
     fn empty_channel_has_zeros() {
-        let ch = build_channel(101, 10, &[], &[], &[], &[], &[]).expect("channel");
+        let ch = ChannelBuilder::new(10).build(101).expect("channel");
         assert_eq!(ch.func_id, 101);
         assert!(ch.values.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn build_all_preserves_request_order() {
+        let channels = ChannelBuilder::new(10)
+            .build_all(&[304, 101, 302])
+            .expect("channels");
+        assert_eq!(
+            channels.iter().map(|ch| ch.func_id).collect::<Vec<_>>(),
+            vec![304, 101, 302]
+        );
+    }
+
+    #[test]
+    fn build_all_empty_request_returns_empty() {
+        let channels = ChannelBuilder::new(10)
+            .build_all(&[])
+            .expect("empty request");
+        assert!(channels.is_empty());
+    }
+
+    #[test]
+    fn unknown_func_id_keeps_error_text() {
+        let err = ChannelBuilder::new(10).build(999).expect_err("unknown id");
+        assert_eq!(err.to_string(), "invalid request: unsupported func_id: 999");
     }
 }

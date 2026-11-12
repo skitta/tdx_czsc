@@ -8,7 +8,7 @@
 //!
 //! 使用仓库内真实数据 tests/data/002340_day.csv（对应报告的 002340 案例）。
 
-use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
+use tdx_czsc_service::analyzer::{AnalysisParams, SnapshotAnalyzer};
 use tdx_czsc_service::proto::analysis::Segment;
 use tdx_czsc_service::state::AppState;
 
@@ -31,8 +31,10 @@ fn build() -> (
         true,
     );
     let state = AppState::new(config_for(6, 1000));
-    let params = AnalysisParams::from((&request, &state.config));
-    let snapshot = build_snapshot(&request, &params).expect("snapshot");
+    let params = AnalysisParams::from(state.config());
+    let snapshot = SnapshotAnalyzer::new(&params)
+        .build_snapshot(&request)
+        .expect("snapshot");
     (dates, snapshot)
 }
 

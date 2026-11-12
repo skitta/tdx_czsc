@@ -1,81 +1,147 @@
 //! 请求信封分发与协议状态码映射。
 //!
-//! `handle_request` 是 IPC 层的统一入口：按请求体分派到各业务 handler，
-//! 并把错误映射为协议状态码（错误来自分析管线时按 `AnalysisError` 分类，
-//! 其余按内部错误处理），始终返回响应信封（不再向上抛错）。
+//! [`Handlers`] 是 IPC 层的统一入口：按请求体分派到各业务 handler，并把错误
+//! 映射为协议状态码（错误来自分析管线时按 `AnalysisError` 分类，其余按内部
+//! 错误处理），始终返回响应信封（不向上抛错）。
+
+use std::sync::Arc;
 
 use crate::analyzer::AnalysisError;
+use crate::config::AppConfig;
 use crate::proto::analysis::request_envelope::Body as RequestBody;
 use crate::proto::analysis::response_envelope::Body as ResponseBody;
-use crate::proto::analysis::{RequestEnvelope, ResponseEnvelope, StatusCode};
+use crate::proto::analysis::{
+    AnalyzeResponse, HealthResponse, RequestEnvelope, ResponseEnvelope, StatusCode, VersionResponse,
+};
 use crate::state::AppState;
+use tracing::warn;
 
-pub mod analyze;
+mod analyze;
 mod debug;
-pub mod health;
-pub mod version;
+mod health;
+mod version;
 
-/// 分发请求信封并生成响应信封。
-pub async fn handle_request(
-    state: &std::sync::Arc<AppState>,
-    request: RequestEnvelope,
-) -> ResponseEnvelope {
-    let protocol_version = state.config.protocol_version.clone();
-    let request_id = request.request_id;
+/// 业务 handler 集合：持有服务状态，按请求类型分发。
+pub struct Handlers {
+    state: Arc<AppState>,
+}
 
-    let result = match request.body {
-        Some(RequestBody::Analyze(req)) => {
-            analyze::handle(state, req).await.map(ResponseBody::Analyze)
-        }
-        Some(RequestBody::Health(req)) => {
-            health::handle(state, req).await.map(ResponseBody::Health)
-        }
-        Some(RequestBody::Version(req)) => {
-            version::handle(state, req).await.map(ResponseBody::Version)
-        }
-        None => Err(anyhow::Error::new(AnalysisError::invalid_request(
-            "request body is missing",
-        ))),
-    };
+impl Handlers {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
 
-    match result {
-        Ok(response_body) => ResponseEnvelope {
-            protocol_version,
-            request_id,
-            status: StatusCode::StatusOk as i32,
-            error_message: String::new(),
-            body: Some(response_body),
-        },
-        Err(err) => build_error_response(state, request_id, error_status(&err), err.to_string()),
+    /// 分发请求信封并生成响应信封。
+    ///
+    /// 唯一调用方是 `#[cfg(windows)]` 的 IPC 层，非 Windows 构建下无调用点；
+    /// 因此保持 `pub` 以免 `dead_code` 误报（同 crate 内无其他入口）。
+    pub async fn dispatch(&self, request: RequestEnvelope) -> ResponseEnvelope {
+        let envelope = Envelope::new(self.state.config(), request.request_id);
+        match request.body {
+            Some(body) => match self.route(body).await {
+                Ok(response) => envelope.ok(response),
+                Err(err) => envelope.fail(&err),
+            },
+            None => {
+                let err =
+                    anyhow::Error::new(AnalysisError::invalid_request("request body is missing"));
+                envelope.fail(&err)
+            }
+        }
+    }
+
+    /// 按请求体分派到具体业务。
+    async fn route(&self, body: RequestBody) -> anyhow::Result<ResponseBody> {
+        Ok(match body {
+            RequestBody::Analyze(request) => ResponseBody::from(self.analyze(request).await?),
+            RequestBody::Health(_) => ResponseBody::from(self.health().await),
+            RequestBody::Version(_) => ResponseBody::from(self.version().await),
+        })
+    }
+
+    /// 服务状态（子模块共享）。
+    pub(crate) fn state(&self) -> &Arc<AppState> {
+        &self.state
     }
 }
 
-/// 把错误映射为协议状态码：
+impl From<AnalyzeResponse> for ResponseBody {
+    fn from(value: AnalyzeResponse) -> Self {
+        Self::Analyze(value)
+    }
+}
+
+impl From<HealthResponse> for ResponseBody {
+    fn from(value: HealthResponse) -> Self {
+        Self::Health(value)
+    }
+}
+
+impl From<VersionResponse> for ResponseBody {
+    fn from(value: VersionResponse) -> Self {
+        Self::Version(value)
+    }
+}
+
+/// 响应信封构造器：成功/失败两条路径的统一出口。
+struct Envelope<'a> {
+    config: &'a AppConfig,
+    request_id: u64,
+}
+
+impl<'a> Envelope<'a> {
+    fn new(config: &'a AppConfig, request_id: u64) -> Self {
+        Self { config, request_id }
+    }
+
+    fn ok<B: Into<ResponseBody>>(self, body: B) -> ResponseEnvelope {
+        ResponseEnvelope {
+            protocol_version: self.config.protocol_version.clone(),
+            request_id: self.request_id,
+            status: StatusCode::StatusOk as i32,
+            error_message: String::new(),
+            body: Some(body.into()),
+        }
+    }
+
+    fn fail(self, err: &anyhow::Error) -> ResponseEnvelope {
+        let status = ErrorStatus::from(err);
+        if status == ErrorStatus(StatusCode::StatusInternalError) {
+            warn!(error = %err, "request failed with internal error");
+        }
+        ResponseEnvelope {
+            protocol_version: self.config.protocol_version.clone(),
+            request_id: self.request_id,
+            status: status.code(),
+            error_message: err.to_string(),
+            body: None,
+        }
+    }
+}
+
+/// 错误 → 协议状态码：
 /// - 请求/校验类（`InvalidRequest`、`UnsupportedFreq`）→ `STATUS_INVALID_REQUEST`；
 /// - 数据分析类（`InvalidBarData`）→ `STATUS_ANALYZE_FAILED`；
 /// - 其余（任务/运行时异常）→ `STATUS_INTERNAL_ERROR`。
-fn error_status(err: &anyhow::Error) -> StatusCode {
-    match err.downcast_ref::<AnalysisError>() {
-        Some(AnalysisError::InvalidRequest(_) | AnalysisError::UnsupportedFreq(_)) => {
-            StatusCode::StatusInvalidRequest
-        }
-        Some(AnalysisError::InvalidBarData { .. }) => StatusCode::StatusAnalyzeFailed,
-        None => StatusCode::StatusInternalError,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ErrorStatus(StatusCode);
+
+impl ErrorStatus {
+    fn code(self) -> i32 {
+        self.0 as i32
     }
 }
 
-pub fn build_error_response(
-    state: &AppState,
-    request_id: u64,
-    status: StatusCode,
-    error_message: impl Into<String>,
-) -> ResponseEnvelope {
-    ResponseEnvelope {
-        protocol_version: state.config.protocol_version.clone(),
-        request_id,
-        status: status as i32,
-        error_message: error_message.into(),
-        body: None,
+impl From<&anyhow::Error> for ErrorStatus {
+    fn from(err: &anyhow::Error) -> Self {
+        match err.downcast_ref::<AnalysisError>() {
+            Some(AnalysisError::InvalidRequest(_) | AnalysisError::UnsupportedFreq(_)) => {
+                Self(StatusCode::StatusInvalidRequest)
+            }
+            Some(AnalysisError::InvalidBarData { .. }) => Self(StatusCode::StatusAnalyzeFailed),
+            Some(AnalysisError::Internal(_)) => Self(StatusCode::StatusInternalError),
+            None => Self(StatusCode::StatusInternalError),
+        }
     }
 }
 
@@ -108,7 +174,7 @@ mod tests {
             })),
         };
         let state = AppState::new(AppConfig::default());
-        handle_request(&state, request).await
+        Handlers::new(state).dispatch(request).await
     }
 
     /// 序列与 data_len 不匹配 → STATUS_INVALID_REQUEST。
@@ -156,8 +222,45 @@ mod tests {
             body: None,
         };
         let state = AppState::new(AppConfig::default());
-        let resp = handle_request(&state, request).await;
+        let resp = Handlers::new(state).dispatch(request).await;
         assert_eq!(resp.status, StatusCode::StatusInvalidRequest as i32);
         assert!(resp.error_message.contains("body is missing"));
+    }
+
+    /// 错误分类 → 协议状态码映射（含非分析错误）。
+    #[test]
+    fn error_status_maps_analysis_errors() {
+        let invalid = anyhow::Error::new(AnalysisError::invalid_request("bad series"));
+        assert_eq!(
+            ErrorStatus::from(&invalid).code(),
+            StatusCode::StatusInvalidRequest as i32
+        );
+
+        let freq = anyhow::Error::new(AnalysisError::UnsupportedFreq("W9".to_string()));
+        assert_eq!(
+            ErrorStatus::from(&freq).code(),
+            StatusCode::StatusInvalidRequest as i32
+        );
+
+        let bar = anyhow::Error::new(AnalysisError::InvalidBarData {
+            index: 3,
+            message: "bad timestamp".to_string(),
+        });
+        assert_eq!(
+            ErrorStatus::from(&bar).code(),
+            StatusCode::StatusAnalyzeFailed as i32
+        );
+
+        let runtime = anyhow::anyhow!("analysis task join failed: cancelled");
+        assert_eq!(
+            ErrorStatus::from(&runtime).code(),
+            StatusCode::StatusInternalError as i32
+        );
+
+        let internal = anyhow::Error::new(AnalysisError::internal("clock before epoch"));
+        assert_eq!(
+            ErrorStatus::from(&internal).code(),
+            StatusCode::StatusInternalError as i32
+        );
     }
 }

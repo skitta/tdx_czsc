@@ -137,9 +137,9 @@ pub(crate) fn test_config() -> AppConfig {
     }
 }
 
-/// 由样例请求 + 测试配置解析出的分析参数（`build_snapshot` 输入）。
-pub(crate) fn test_params(request: &AnalyzeRequest) -> AnalysisParams {
-    AnalysisParams::from((request, &test_config()))
+/// 测试配置对应的分析参数（`build_snapshot` 输入；请求选项由管线解析）。
+pub(crate) fn test_params() -> AnalysisParams {
+    AnalysisParams::from(&test_config())
 }
 
 pub(crate) fn channel(snapshot: &AnalysisSnapshot, func_id: u32) -> &ChannelSeries {

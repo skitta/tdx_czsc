@@ -1,34 +1,83 @@
-//! 笔中枢构建：原生 czsc `get_zs_seq` + 前端/后端优化（纯笔序列操作）。
+//! 中枢构建：笔中枢与段中枢共用同一套原生贪心划分 + 前端/后端优化。
 //!
-//! 原生 `get_zs_seq` 的笔归属是贪心的：与当前中枢区间无交集的"离开/连接笔"
-//! 并入下一个中枢作为其第一笔，导致中枢首笔/末笔可能混入进入/连接笔。这里
-//! 保留原生的中枢划分，优化两端：
+//! 构件通过 [`PivotUnit`] 抽象为"方向 + 高低点 + 绘制区间 + 起点价格"：笔和
+//! 已确认段只是构造 unit 的来源不同，算法本身（原生归属、趋势判定、进入/
+//! 离开构件剔除、相邻间隔）完全复用。
 //!
-//! **前端（第一笔）**：中枢第一笔必须与行情趋势相反——上升行情中第一笔
-//! 向下（"下上下"重叠）、下跌行情中第一笔向上（"上下上"重叠）。行情方向
+//! **原生划分**（对齐 `czsc-core::get_zs_seq`）：逐构件贪心归属，构件完全
+//! 离开当前中枢区间（向上构件的 high 低于下沿、向下构件的 low 高于上沿）时
+//! 另起中枢；与当前中枢区间无交集的"离开/连接构件"会并入下一个中枢作为其
+//! 第一构件，导致中枢首/末构件可能混入进入/连接构件。这里保留原生的中枢
+//! 划分，优化两端：
+//!
+//! **前端（第一构件）**：中枢第一构件必须与行情趋势相反——上升行情中第一
+//! 构件向下（"下上下"重叠）、下跌行情中第一构件向上（"上下上"重叠）。行情方向
 //! 按中枢高低位置判定：后一个中枢中轴（zz）比前一个高 → 上升行情，更低 →
 //! 下降行情；中轴平齐沿用前一趋势。第一个中枢无前序中枢，以其位置与窗口
-//! 起点价格比较兜底。首笔与趋势同向视为进入/连接笔，予以剔除；区间
-//! [zd, zg] 由剔除后剩余前 3 笔的重叠重新计算。
+//! 起点价格比较兜底。首构件与趋势同向视为进入/连接构件，予以剔除；区间
+//! [zd, zg] 由剔除后剩余前 3 个构件的重叠重新计算。
 //!
-//! **后端（最后一笔）**：中枢最后一笔必须与行情趋势相反（与前端对称，
-//! 中枢为奇数笔结构）——末笔与趋势同向视为离开笔，予以剔除。
+//! **后端（最后一构件）**：中枢最后一构件必须与行情趋势相反（与前端对称，
+//! 中枢为奇数构件结构）——末构件与趋势同向视为离开构件，予以剔除。
 //!
 //! **相邻间隔**：前一个中枢后端与后一中枢前端不得共享端点，必须至少间隔
-//! 一笔——后端剔除后，离开/连接笔落在两个中枢矩形之间，不属于任一中枢。
+//! 一构件——后端剔除后，离开/连接构件落在两个中枢矩形之间，不属于任一中枢。
 //!
-//! 剔除后不足 3 笔、前 3 笔无重叠、或无法同时满足上述规则的候选中枢整组
+//! 剔除后不足 3 个构件、前 3 个构件无重叠、或无法同时满足上述规则的候选中枢整组
 //! 剔除（不绘制）。
 
-use czsc_core::analyze::utils::get_zs_seq;
 use czsc_core::objects::bi::BI;
 use czsc_core::objects::direction::Direction as CzscDirection;
 use czsc_core::objects::zs::ZS;
 
 use super::objects::BiAnchor;
+use super::segs::Segment;
 use super::signals::BuySellPoint;
 
-/// 在原生 czsc 中枢（`get_zs_seq`）之上优化前端与后端。
+/// 中枢构件（笔或已确认段）的算法视图：只保留中枢判定实际读取的字段。
+///
+/// 笔与段的价格语义一致：`high`/`low` 为构件最高/最低价，`start_price` 为
+/// 构件起点价（仅用于首个中枢的趋势兜底），`start_index`/`end_index` 为
+/// 构件两端对应的原始 K 线下标（缺失时该中枢不参与通道绘制）。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PivotUnit {
+    direction: CzscDirection,
+    high: f64,
+    low: f64,
+    start_index: Option<usize>,
+    end_index: Option<usize>,
+    start_price: f64,
+}
+
+impl PivotUnit {
+    /// 以一笔为构件。
+    fn from_bi(bi: &BI) -> Self {
+        Self {
+            direction: bi.direction,
+            high: bi.get_high(),
+            low: bi.get_low(),
+            start_index: bi.start_index(),
+            end_index: bi.end_index(),
+            start_price: bi.fx_a.fx,
+        }
+    }
+
+    /// 一组构件前 3 个的重叠区间：`zd` 取低点最大值、`zg` 取高点最小值。
+    fn band(units: &[PivotUnit], indices: &[usize]) -> (f64, f64) {
+        let first: &[usize] = &indices[..indices.len().min(3)];
+        let zd = first
+            .iter()
+            .map(|&i| units[i].low)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let zg = first
+            .iter()
+            .map(|&i| units[i].high)
+            .fold(f64::INFINITY, f64::min);
+        (zd, zg)
+    }
+}
+
+/// 在原生贪心中枢之上优化前端与后端。
 pub struct PivotAnalyzer<'a> {
     bis: &'a [BI],
 }
@@ -39,41 +88,59 @@ impl<'a> PivotAnalyzer<'a> {
     }
 
     pub fn build(&self) -> Vec<ZS> {
-        let native = get_zs_seq(self.bis);
+        let units: Vec<PivotUnit> = self.bis.iter().map(PivotUnit::from_bi).collect();
+        Self::build_selection(&units)
+            .into_iter()
+            .map(|indices| ZS::new(indices.into_iter().map(|i| self.bis[i].clone()).collect()))
+            .collect()
+    }
+
+    /// 对任意中枢构件做原生划分 + 前端/后端优化，返回每个中枢的构件下标。
+    ///
+    /// 笔中枢与段中枢共用此实现：调用方只需提供 [`PivotUnit`] 视图，再把
+    /// 选中的下标映射回自己的对象（`ZS` / `SegmentPivot`）。
+    pub(crate) fn build_selection(units: &[PivotUnit]) -> Vec<Vec<usize>> {
+        let native = Self::native_groups(units);
 
         // 第一遍：前端优化 + 行情趋势链（方向按中枢高低位置递推）
-        let mut fronts: Vec<(ZS, CzscDirection)> = Vec::new();
+        let mut fronts: Vec<(Vec<usize>, CzscDirection)> = Vec::new();
         let mut prev_zz: Option<f64> = None;
         let mut prev_trend: Option<CzscDirection> = None;
-        for zs in &native {
+        for group in &native {
+            let (zd, zg) = PivotUnit::band(units, group);
+            let zz = zd + (zg - zd) * 0.5;
             // 行情方向：按中枢高低位置判定（当前中枢用原生中轴与前一中枢的
-            // 最终中轴比较；剔除进入笔对中轴影响很小，不影响方向判定）
+            // 最终中轴比较；剔除进入构件对中轴影响很小，不影响方向判定）
             let trend = match prev_zz {
                 None => {
-                    if zs.zz > self.bis[0].fx_a.fx {
+                    if zz > units[0].start_price {
                         CzscDirection::Up
                     } else {
                         CzscDirection::Down
                     }
                 }
-                Some(prev) if zs.zz > prev => CzscDirection::Up,
-                Some(prev) if zs.zz < prev => CzscDirection::Down,
+                Some(prev) if zz > prev => CzscDirection::Up,
+                Some(prev) if zz < prev => CzscDirection::Down,
                 Some(_) => prev_trend.unwrap_or(CzscDirection::Up),
             };
-            let Some(trimmed) = self.trim_front(zs, trend) else {
+            let Some(trimmed) = Self::trim_front(units, group, trend) else {
                 continue;
             };
-            prev_zz = Some(trimmed.zz);
+            let (trimmed_zd, trimmed_zg) = PivotUnit::band(units, &trimmed);
+            prev_zz = Some(trimmed_zd + (trimmed_zg - trimmed_zd) * 0.5);
             prev_trend = Some(trend);
             fronts.push((trimmed, trend));
         }
 
         // 第二遍：后端优化（从后往前处理——需要后一保留中枢的起点判断相邻间隔，
         // 倒序时 result 的最后一个即"后一中枢"，被剔除的中枢自动跳过）
-        let mut result: Vec<ZS> = Vec::new();
-        for (zs, trend) in fronts.into_iter().rev() {
-            let next_start = result.last().and_then(|p| p.bis.first().start_index());
-            let Some(trimmed) = self.trim_back(zs, trend, next_start) else {
+        let mut result: Vec<Vec<usize>> = Vec::new();
+        for (group, trend) in fronts.into_iter().rev() {
+            let next_start = result
+                .last()
+                .and_then(|next| next.first())
+                .and_then(|&i| units[i].start_index);
+            let Some(trimmed) = Self::trim_back(units, group, trend, next_start) else {
                 continue;
             };
             result.push(trimmed);
@@ -82,64 +149,87 @@ impl<'a> PivotAnalyzer<'a> {
         result
     }
 
-    /// 剔除中枢的进入/连接笔（前端），返回优化后的中枢。
-    fn trim_front(&self, zs: &ZS, trend: CzscDirection) -> Option<ZS> {
-        let mut bis: Vec<BI> = zs.bis.clone();
-        if bis.len() < 3 {
+    /// 原生贪心划分（与 `czsc-core::get_zs_seq` 一致）。
+    fn native_groups(units: &[PivotUnit]) -> Vec<Vec<usize>> {
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (i, unit) in units.iter().enumerate() {
+            // 构件完全离开当前中枢区间时另起一组；首构件无区间可直接开组。
+            let leave = groups.last().is_none_or(|current| {
+                let (zd, zg) = PivotUnit::band(units, current);
+                match unit.direction {
+                    CzscDirection::Up => unit.high < zd,
+                    CzscDirection::Down => unit.low > zg,
+                }
+            });
+            match groups.last_mut() {
+                Some(current) if !leave => current.push(i),
+                _ => groups.push(vec![i]),
+            }
+        }
+        groups
+    }
+
+    /// 剔除中枢的进入/连接构件（前端），返回优化后的构件下标。
+    fn trim_front(
+        units: &[PivotUnit],
+        group: &[usize],
+        trend: CzscDirection,
+    ) -> Option<Vec<usize>> {
+        let mut indices = group.to_vec();
+        if indices.len() < 3 {
             return None;
         }
-        // 前端：首笔与趋势同向 = 进入/连接笔，剔除
-        if bis[0].direction == trend {
-            bis.remove(0);
-            if bis.len() < 3 {
+        // 前端：首构件与趋势同向 = 进入/连接构件，剔除
+        if units[indices[0]].direction == trend {
+            indices.remove(0);
+            if indices.len() < 3 {
                 return None;
             }
         }
-        // 区间 [zd, zg] = 前 3 笔的重叠（剔除进入笔后重新计算）
-        let zd = bis[..3]
-            .iter()
-            .map(|b| b.get_low())
-            .fold(f64::NEG_INFINITY, f64::max);
-        let zg = bis[..3]
-            .iter()
-            .map(|b| b.get_high())
-            .fold(f64::INFINITY, f64::min);
+        // 区间 [zd, zg] = 前 3 个构件的重叠（剔除进入构件后重新计算）
+        let (zd, zg) = PivotUnit::band(units, &indices);
         if zg < zd {
             return None;
         }
-        Some(ZS::new(bis))
+        Some(indices)
     }
 
-    /// 剔除中枢的离开笔（后端），返回优化后的中枢。
-    fn trim_back(&self, zs: ZS, trend: CzscDirection, next_start: Option<usize>) -> Option<ZS> {
-        let mut bis = zs.bis;
+    /// 剔除中枢的离开构件（后端），返回优化后的构件下标。
+    fn trim_back(
+        units: &[PivotUnit],
+        group: Vec<usize>,
+        trend: CzscDirection,
+        next_start: Option<usize>,
+    ) -> Option<Vec<usize>> {
+        let mut indices = group;
         loop {
-            if bis.len() <= 3 {
+            if indices.len() <= 3 {
                 break;
             }
-            let Some(last) = bis.last() else {
+            let Some(&last_idx) = indices.last() else {
                 break;
             };
+            let last = &units[last_idx];
             // 规则二（间隔，优先级低于前端）：与后一中枢共享/相交端点时，
-            // 后中枢前端不动（前端优先），本中枢（前中枢）末端退回一笔
-            let shares = next_start.is_some_and(|s| bis.last().end_index().is_some_and(|e| e >= s));
-            // 规则一（方向）：退回后若末笔与趋势同向（离开笔），还需再退一笔
+            // 后中枢前端不动（前端优先），本中枢（前中枢）末端退回一构件
+            let shares = next_start.is_some_and(|s| last.end_index.is_some_and(|e| e >= s));
+            // 规则一（方向）：退回后若末构件与趋势同向（离开构件），还需再退一构件
             let wrong_dir = last.direction == trend;
             if !shares && !wrong_dir {
                 break;
             }
-            bis.pop();
+            indices.pop();
         }
-        if bis.len() < 3 {
+        if indices.len() < 3 {
             return None;
         }
-        let last = bis.last()?;
+        let last = &units[*indices.last()?];
         if last.direction == trend
-            || next_start.is_some_and(|s| bis.last().end_index().is_some_and(|e| e >= s))
+            || next_start.is_some_and(|s| last.end_index.is_some_and(|e| e >= s))
         {
             return None;
         }
-        Some(ZS::new(bis))
+        Some(indices)
     }
 
     /// 三买/三卖缠论严格化：每个中枢最多一个三买（405）和一个三卖（406）。
@@ -170,6 +260,73 @@ impl<'a> PivotAnalyzer<'a> {
             }
             true
         });
+    }
+}
+
+/// 段中枢：以已确认段为构件、由笔中枢同一套规则选出并计算几何。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SegmentPivot {
+    pub(crate) zg: f64,
+    pub(crate) zd: f64,
+    pub(crate) zz: f64,
+    pub(crate) start_index: Option<usize>,
+    pub(crate) end_index: Option<usize>,
+}
+
+impl SegmentPivot {
+    /// 绘制区间：首个构件起点 → 末个构件终点（缺失时该中枢不绘制）。
+    pub(crate) fn span(&self) -> Option<(usize, usize)> {
+        let start = self.start_index?;
+        let end = self.end_index?;
+        Some((start.min(end), start.max(end)))
+    }
+}
+
+/// 段中枢构建：只消费已确认段（`is_sure=true`），未确认段不参与。
+pub(crate) struct SegmentPivotAnalyzer<'a> {
+    bis: &'a [BI],
+    segs: &'a [Segment],
+}
+
+impl<'a> SegmentPivotAnalyzer<'a> {
+    pub(crate) fn new(bis: &'a [BI], segs: &'a [Segment]) -> Self {
+        Self { bis, segs }
+    }
+
+    pub(crate) fn build(&self) -> Vec<SegmentPivot> {
+        let units: Vec<PivotUnit> = self
+            .segs
+            .iter()
+            .filter(|seg| seg.is_sure)
+            .filter_map(|seg| {
+                let start = self.bis.get(seg.start_bi_idx)?;
+                let end = self.bis.get(seg.end_bi_idx)?;
+                Some(PivotUnit {
+                    direction: seg.direction,
+                    high: start.get_high().max(end.get_high()),
+                    low: start.get_low().min(end.get_low()),
+                    start_index: start.start_index(),
+                    end_index: end.end_index(),
+                    start_price: start.fx_a.fx,
+                })
+            })
+            .collect();
+
+        PivotAnalyzer::build_selection(&units)
+            .into_iter()
+            .filter_map(|indices| {
+                let first = *indices.first()?;
+                let last = *indices.last()?;
+                let (zd, zg) = PivotUnit::band(&units, &indices);
+                Some(SegmentPivot {
+                    zg,
+                    zd,
+                    zz: zd + (zg - zd) * 0.5,
+                    start_index: units[first].start_index,
+                    end_index: units[last].end_index,
+                })
+            })
+            .collect()
     }
 }
 

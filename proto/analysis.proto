@@ -90,6 +90,11 @@ enum ChannelKind {
   // 中枢边界标记：区间首尾 K 线输出 1，用于在图上画闭合矩形
   CHANNEL_ZS_BOUNDARY = 304;
 
+  // 段中枢通道：以已确认段为构件，规则与笔中枢一致
+  CHANNEL_SEG_ZS_UPPER = 305;
+  CHANNEL_SEG_ZS_LOWER = 306;
+  CHANNEL_SEG_ZS_BOUNDARY = 307;
+
   // 买卖点通道
   CHANNEL_BUY1 = 401;
   CHANNEL_SELL1 = 402;
@@ -205,6 +210,9 @@ message AnalysisSnapshot {
   repeated PivotZone pivots = 5;
   repeated SignalPoint signals = 6;
   repeated Segment segments = 7;
+
+  // 段中枢（以已确认段为构件），字段语义与 pivots 一致
+  repeated PivotZone segment_pivots = 8;
 }
 
 message SnapshotMeta {

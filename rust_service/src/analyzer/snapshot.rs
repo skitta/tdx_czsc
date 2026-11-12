@@ -13,7 +13,7 @@ use crate::proto::analysis::{
 
 use super::channels::ChannelBuilder;
 use super::error::AnalysisError;
-use super::pivots::PivotAnalyzer;
+use super::pivots::{PivotAnalyzer, SegmentPivotAnalyzer};
 use super::segs::SegmentAnalyzer;
 use super::settings::AnalysisSettings;
 use super::signals::BuySellPoint;
@@ -68,6 +68,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
         let t0 = std::time::Instant::now();
         let pivots = PivotAnalyzer::new(&finished_bis).build();
         let segs = SegmentAnalyzer::new(&finished_bis).build();
+        let segment_pivots = SegmentPivotAnalyzer::new(&finished_bis, &segs).build();
         PivotAnalyzer::strictize_third_points(&mut self.buy_sell_points, &pivots);
         if let Some(p) = profile.as_deref_mut() {
             p.pivots_segs += t0.elapsed();
@@ -78,6 +79,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
             .fractals(&fractals)
             .bis(&finished_bis)
             .pivots(&pivots)
+            .segment_pivots(&segment_pivots)
             .segs(&segs)
             .buy_sell_points(&self.buy_sell_points)
             .build_all(self.settings.requested_func_ids())?;
@@ -94,7 +96,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
         .unwrap_or(u64::MAX);
 
         let t2 = std::time::Instant::now();
-        let (fractals_obj, strokes_obj, pivots_obj, signals_obj, segments_obj) =
+        let (fractals_obj, strokes_obj, pivots_obj, signals_obj, segments_obj, segment_pivots_obj) =
             if self.settings.include_objects() {
                 (
                     fractals
@@ -121,6 +123,10 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
                     segs.iter()
                         .filter_map(|s| s.to_proto(&finished_bis))
                         .collect::<Vec<_>>(),
+                    segment_pivots
+                        .iter()
+                        .filter_map(|p| PivotZone::try_from(p).ok())
+                        .collect::<Vec<_>>(),
                 )
             } else {
                 (
@@ -129,6 +135,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
                     Vec::<PivotZone>::new(),
                     Vec::<SignalPoint>::new(),
                     Vec::new(),
+                    Vec::<PivotZone>::new(),
                 )
             };
         if let Some(p) = profile {
@@ -153,6 +160,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
             pivots: pivots_obj,
             signals: signals_obj,
             segments: segments_obj,
+            segment_pivots: segment_pivots_obj,
         })
     }
 }

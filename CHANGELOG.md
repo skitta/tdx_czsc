@@ -3,7 +3,7 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
-## [未发布]
+## [0.10.0] - 2026-11
 
 **段中枢**（以已确认段为构件，复用笔中枢规则）。
 

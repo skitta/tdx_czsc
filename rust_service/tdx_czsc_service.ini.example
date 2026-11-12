@@ -1,6 +1,8 @@
 # 缠论分析服务端配置（可选，文件不存在时全部使用内置默认值）。
 # 与本文件同目录的 tdx_czsc_service.exe 启动时读取；键名 = 值，UTF-8 编码，
 # # 或 ; 开头为注释。环境变量 TDX_CZSC_* 优先级高于本文件。
+# 取值按 Rust 的 FromStr 解析：布尔键只接受小写 true/false（1/0、TRUE 均为
+# 非法值）；数值键必须是目标类型范围内的整数，否则直接报错而不是静默回退。
 #
 # 注意：与 Bridge DLL 的 tdx_czsc_bridge.ini 一样放在通达信 T0002/dlls/
 # 目录（服务端 exe 也在那里）；DLL 请求携带的 max_bi_num/min_bi_len/

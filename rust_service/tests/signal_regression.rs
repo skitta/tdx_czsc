@@ -10,7 +10,7 @@
 
 use czsc_core::analyze::CZSC;
 use std::collections::HashSet;
-use tdx_czsc_service::analyzer::compute_buy_sell_points;
+use tdx_czsc_service::analyzer::SignalAnalyzer;
 
 mod common;
 use common::{analyze_request, config_for, load_raw_bars, load_series};
@@ -32,7 +32,9 @@ fn final_bi_end_extremes(bars: &[czsc_core::objects::bar::RawBar]) -> HashSet<us
 #[test]
 fn signal_anchors_are_final_bi_endpoints_and_unique() {
     let bars = load_raw_bars("../tests/data/002340_day.csv", 3933 - 1000);
-    let (_czsc, points) = compute_buy_sell_points(&bars, 50, 6);
+    let (_czsc, points) = SignalAnalyzer::new(&bars, 50, 6)
+        .compute()
+        .expect("signal analysis");
 
     assert!(!points.is_empty(), "002340 window should produce signals");
 
@@ -62,7 +64,9 @@ fn signal_anchors_are_final_bi_endpoints_and_unique() {
 #[test]
 fn second_bs_attached_to_first_bs() {
     let bars = load_raw_bars("../tests/data/002340_day.csv", 3933 - 1000);
-    let (_czsc, points) = compute_buy_sell_points(&bars, 50, 6);
+    let (_czsc, points) = SignalAnalyzer::new(&bars, 50, 6)
+        .compute()
+        .expect("signal analysis");
 
     let mut sorted: Vec<&tdx_czsc_service::analyzer::BuySellPoint> = points.iter().collect();
     sorted.sort_by_key(|p| p.index);
@@ -92,7 +96,7 @@ fn second_bs_attached_to_first_bs() {
 /// 走 build_snapshot 实际路径（严格化发生在中枢构建之后）。
 #[test]
 fn third_bs_capped_per_pivot() {
-    use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
+    use tdx_czsc_service::analyzer::{AnalysisParams, SnapshotAnalyzer};
     use tdx_czsc_service::state::AppState;
 
     let (_, high, low, close) = load_series("../tests/data/002340_day.csv");
@@ -107,8 +111,10 @@ fn third_bs_capped_per_pivot() {
         true,
     );
     let state = AppState::new(config_for(6, 1000));
-    let params = AnalysisParams::from((&request, &state.config));
-    let snapshot = build_snapshot(&request, &params).expect("snapshot");
+    let params = AnalysisParams::from(state.config());
+    let snapshot = SnapshotAnalyzer::new(&params)
+        .build_snapshot(&request)
+        .expect("snapshot");
 
     // 三买/三卖数量不应超过中枢数量（每个中枢最多一个）
     let n405 = snapshot.signals.iter().filter(|s| s.kind == 5).count();

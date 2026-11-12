@@ -21,7 +21,7 @@
 //!
 //! 每类买点单独运行同一套规则（与模板 `一买段/二买段/三买段` 三块对应）。
 
-use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
+use tdx_czsc_service::analyzer::{AnalysisParams, SnapshotAnalyzer};
 use tdx_czsc_service::state::AppState;
 
 mod common;
@@ -407,8 +407,10 @@ fn load_window_with_buy_channels() -> WindowData {
         true,
     );
     let state = AppState::new(config_for(6, WINDOW as u32));
-    let params = AnalysisParams::from((&request, &state.config));
-    let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
+    let params = AnalysisParams::from(state.config());
+    let snapshot = SnapshotAnalyzer::new(&params)
+        .build_snapshot(&request)
+        .expect("snapshot should build");
 
     // 通道数组与全部输入对齐；分析窗口外为 0，仅取最后 WINDOW 根
     let start = n - WINDOW;

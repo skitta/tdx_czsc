@@ -5,6 +5,9 @@ fn main() {
         let vcpkg_protoc =
             "E:/DELL/Documents/Codes/vcpkg/installed/x64-windows/tools/protobuf/protoc.exe";
         if std::path::Path::new(vcpkg_protoc).is_file() {
+            // 唯一允许的 unsafe：edition 2024 起 `set_var` 因线程安全原因变成
+            // unsafe，构建脚本是单线程且在任何子进程 spawn 之前执行，此处安全。
+            #[allow(unsafe_code)]
             unsafe {
                 std::env::set_var("PROTOC", vcpkg_protoc);
             }

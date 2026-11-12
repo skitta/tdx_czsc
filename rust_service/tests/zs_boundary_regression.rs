@@ -3,7 +3,7 @@
 //! 右边框，图上只剩左侧竖线、没有上下边框和右边框。
 //! 使用仓库内的真实数据 tests/data/002340_day.csv。
 
-use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot};
+use tdx_czsc_service::analyzer::{AnalysisParams, SnapshotAnalyzer};
 use tdx_czsc_service::state::AppState;
 
 mod common;
@@ -28,8 +28,10 @@ fn build_channels() -> (
     );
 
     let state = AppState::new(config_for(6, 1000));
-    let params = AnalysisParams::from((&request, &state.config));
-    let snapshot = build_snapshot(&request, &params).expect("snapshot should build");
+    let params = AnalysisParams::from(state.config());
+    let snapshot = SnapshotAnalyzer::new(&params)
+        .build_snapshot(&request)
+        .expect("snapshot should build");
 
     let boundary = snapshot
         .channels
@@ -100,7 +102,7 @@ fn adjacent_pivots_never_share_endpoints_on_real_data() {
 fn pivot_edges_follow_trend_on_real_data() {
     use czsc_core::analyze::CZSC;
     use czsc_core::objects::direction::Direction;
-    use tdx_czsc_service::analyzer::{build_pivots, build_raw_bars, parse_freq};
+    use tdx_czsc_service::analyzer::{FreqHint, PivotAnalyzer, RawBarFactory};
 
     for (csv_path, freq_hint, min_bi_len, window) in [
         ("../tests/data/002340_day.csv", "D", 6, 1000u32),
@@ -121,18 +123,14 @@ fn pivot_edges_follow_trend_on_real_data() {
 
         let state = AppState::new(config_for(min_bi_len, window));
 
-        let freq = parse_freq(freq_hint).expect("freq");
+        let freq = FreqHint::new(freq_hint).parse().expect("freq");
         let window_start = (request.data_len as usize).saturating_sub(window as usize);
-        let bars = build_raw_bars(
-            &request,
-            freq,
-            window_start,
-            state.config.derive_volume_proxy,
-        )
-        .expect("bars");
+        let bars = RawBarFactory::new(&request, state.config().derive_volume_proxy)
+            .build(freq, window_start)
+            .expect("bars");
         let czsc = CZSC::new(bars, 50, min_bi_len as usize);
         let bis = czsc.get_finished_bis();
-        let pivots = build_pivots(&bis);
+        let pivots = PivotAnalyzer::new(&bis).build();
 
         assert!(
             !pivots.is_empty(),

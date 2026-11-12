@@ -29,7 +29,7 @@ use czsc_signals::types::TaCache;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use tdx_czsc_service::analyzer::{AnalysisParams, build_snapshot, compute_buy_sell_points};
+use tdx_czsc_service::analyzer::{AnalysisParams, SignalAnalyzer, SnapshotAnalyzer};
 use tdx_czsc_service::state::AppState;
 
 mod common;
@@ -315,7 +315,9 @@ fn first_buy_detected_on_synthetic_downtrend() {
     //    演化中"当前末端"创新低即可能命中（czsc 信号为状态型），
     //    因此最早命中点可能在中间向下笔（本样本为 idx=37 的段4 折点），
     //    但末段（力度最弱）必须也产生一个 401 点并锚在末笔端点。
-    let (_czsc, points) = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
+    let (_czsc, points) = SignalAnalyzer::new(&bars, 50, MIN_BI_LEN)
+        .compute()
+        .expect("signal analysis");
     let anchor = first_buy_anchor_index();
     let buy1s: Vec<&tdx_czsc_service::analyzer::BuySellPoint> =
         points.iter().filter(|p| p.func_id == 401).collect();
@@ -354,8 +356,10 @@ fn first_buy_channel_via_proxy_on_synthetic_downtrend() {
         true,
     );
 
-    let params = AnalysisParams::from((&request, &state.config));
-    let snapshot = build_snapshot(&request, &params).expect("snapshot");
+    let params = AnalysisParams::from(state.config());
+    let snapshot = SnapshotAnalyzer::new(&params)
+        .build_snapshot(&request)
+        .expect("snapshot");
     let channel = snapshot
         .channels
         .iter()
@@ -414,7 +418,9 @@ fn first_sell_detected_on_synthetic_uptrend() {
         "一卖信号必须命中（7笔窗口）"
     );
 
-    let (_czsc, points) = compute_buy_sell_points(&bars, 50, MIN_BI_LEN);
+    let (_czsc, points) = SignalAnalyzer::new(&bars, 50, MIN_BI_LEN)
+        .compute()
+        .expect("signal analysis");
     let sell1 = points.iter().find(|p| p.func_id == 402);
     assert!(
         sell1.is_some(),

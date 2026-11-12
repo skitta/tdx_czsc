@@ -4,7 +4,7 @@
 //! 协议层用 `anyhow` 携带上下文并把类型化错误映射为协议状态码：
 //! - 请求/校验类（`InvalidRequest`、`UnsupportedFreq`）→ `STATUS_INVALID_REQUEST`；
 //! - 数据分析类（`InvalidBarData`）→ `STATUS_ANALYZE_FAILED`；
-//! - 其余（任务/运行时异常）→ `STATUS_INTERNAL_ERROR`。
+//! - 内部异常（`Internal`）→ `STATUS_INTERNAL_ERROR`。
 //!
 //! `AnalysisError` 为 `Send + Sync + 'static`，可被
 //! `anyhow::Error::downcast_ref` 从任意上下文链中取回用于状态码映射。
@@ -25,18 +25,26 @@ pub enum AnalysisError {
     /// 单根 K 线构造失败（非法时间戳、czsc RawBarBuilder 校验失败等）。
     #[error("failed to build bar at index {index}: {message}")]
     InvalidBarData { index: usize, message: String },
+
+    /// 服务内部错误（时钟异常、不可恢复的运行时状态等）。
+    #[error("internal analysis error: {0}")]
+    Internal(String),
 }
 
 impl AnalysisError {
-    pub fn invalid_request(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
         AnalysisError::InvalidRequest(message.into())
     }
 
-    pub fn invalid_bar_data(index: usize, message: impl Into<String>) -> Self {
+    pub(crate) fn invalid_bar_data(index: usize, message: impl Into<String>) -> Self {
         AnalysisError::InvalidBarData {
             index,
             message: message.into(),
         }
+    }
+
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        AnalysisError::Internal(message.into())
     }
 }
 

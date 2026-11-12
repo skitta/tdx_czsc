@@ -11,7 +11,7 @@ use tdx_czsc_service::proto::analysis::{AnalyzeRequest, CzscOptions, MarketSerie
 /// 读取仓库数据 CSV（`日期,开,高,低,收,...`），返回 (日期, high, low, close)。
 /// `#[allow(dead_code)]`：各测试二进制独立编译，个别测试只用 `analyze_request`。
 #[allow(dead_code)]
-pub fn load_series(path: &str) -> (Vec<String>, Vec<f32>, Vec<f32>, Vec<f32>) {
+pub(crate) fn load_series(path: &str) -> (Vec<String>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let csv = std::fs::read_to_string(path).expect("read csv");
     let mut dates = Vec::new();
     let mut high = Vec::new();
@@ -36,7 +36,7 @@ pub fn load_series(path: &str) -> (Vec<String>, Vec<f32>, Vec<f32>, Vec<f32>) {
 /// 现统一于此）。
 /// `#[allow(dead_code)]`：个别测试二进制只走 `analyze_request` 路径。
 #[allow(dead_code)]
-pub fn load_raw_bars(path: &str, start: usize) -> Vec<RawBar> {
+pub(crate) fn load_raw_bars(path: &str, start: usize) -> Vec<RawBar> {
     let csv = std::fs::read_to_string(path).expect("read csv");
     let mut bars = Vec::new();
     for (i, line) in csv.lines().skip(1).enumerate() {
@@ -79,7 +79,7 @@ pub fn load_raw_bars(path: &str, start: usize) -> Vec<RawBar> {
 /// `#[allow(dead_code)]`：各测试二进制独立编译，个别二进制只用 `load_series`。
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-pub fn analyze_request(
+pub(crate) fn analyze_request(
     requested_func_ids: Vec<u32>,
     freq_hint: &str,
     high: Vec<f32>,
@@ -106,7 +106,7 @@ pub fn analyze_request(
 /// 缺省接口保持 50 以兼容既有调用点）。
 #[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
-pub fn analyze_request_ex(
+pub(crate) fn analyze_request_ex(
     requested_func_ids: Vec<u32>,
     freq_hint: &str,
     high: Vec<f32>,
@@ -146,7 +146,7 @@ pub fn analyze_request_ex(
 
 /// 按笔长/分析窗口构造测试配置（贴近各数据文件的实际参数）。
 #[allow(dead_code)]
-pub fn config_for(min_bi_len: u32, analysis_window: u32) -> AppConfig {
+pub(crate) fn config_for(min_bi_len: u32, analysis_window: u32) -> AppConfig {
     AppConfig {
         min_bi_len,
         default_analysis_window: analysis_window,

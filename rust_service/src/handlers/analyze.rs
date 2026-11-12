@@ -1,307 +1,308 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use tokio::sync::OwnedSemaphorePermit;
 
-use super::debug::{patch_debug_channels, timing_stats};
-use crate::analyzer;
-use crate::analyzer::{AcceptOutcome, IncrementalKey, IncrementalState};
+use super::Handlers;
+use super::debug::{CacheState, SnapshotPatch, Timing};
+use crate::analyzer::{AnalysisParams, IncrementalMode, ResolvedParams};
 use crate::cache::CacheKey;
 use crate::proto::analysis::{AnalysisSnapshot, AnalyzeRequest, AnalyzeResponse};
 use crate::state::AppState;
 
-/// 等待同数据段（CacheKey）的在途分析完成并重查缓存。
+impl Handlers {
+    /// 分析请求入口：缓存 → singleflight → 并发槽 → 复查缓存 → 阻塞计算。
+    pub async fn analyze(&self, request: AnalyzeRequest) -> Result<AnalyzeResponse> {
+        AnalyzeRun::new(self.state(), request).execute().await
+    }
+}
+
+/// 单次分析请求的编排状态机。
 ///
-/// 在途分析方无论成败都会 `notify_waiters()`；这里用 15s 超时兜底，
-/// 防极端异常（分析方崩溃）导致永久挂起。缓存命中返回响应，否则 None
-/// （调用方随后自行接管分析）。
-async fn await_in_flight_result(
-    state: &Arc<AppState>,
-    cache_key: &CacheKey,
+/// 每个阶段方法只做一件事，命中时提前给出响应；[`execute`](Self::execute)
+/// 按序串接各阶段，避免把缓存、并发与计算混在一个函数体里。
+struct AnalyzeRun<'a> {
+    state: &'a Arc<AppState>,
+    request: Arc<AnalyzeRequest>,
+    params: Arc<AnalysisParams>,
+    cache_key: CacheKey,
     started: Instant,
-) -> Option<AnalyzeResponse> {
-    let notify = state.in_flight.lock().unwrap().get(cache_key).cloned()?;
-    let _ = tokio::time::timeout(Duration::from_secs(15), notify.notified()).await;
-
-    let cache = state.cache.read().await;
-    let mut snapshot = cache.get(cache_key)?;
-    drop(cache);
-
-    let elapsed_ms = started.elapsed().as_millis() as u32;
-    patch_debug_channels(&mut snapshot.channels, false, elapsed_ms as f32);
-    Some(AnalyzeResponse {
-        snapshot: Some(snapshot),
-        service_cache_hit: true,
-        timing: Some(timing_stats(elapsed_ms, 0)),
-    })
+    _active: ActiveRequestGuard,
+    in_flight: Option<InFlightSlot>,
 }
 
-/// 撤销本请求的在途登记并唤醒所有等待者（无论分析成败，防止等待方挂死）。
-fn release_in_flight(state: &Arc<AppState>, cache_key: &CacheKey) {
-    if let Some(notify) = state.in_flight.lock().unwrap().remove(cache_key) {
-        notify.notify_waiters();
+impl<'a> AnalyzeRun<'a> {
+    fn new(state: &'a Arc<AppState>, request: AnalyzeRequest) -> Self {
+        let params = Arc::new(AnalysisParams::from(state.config()));
+        let cache_key = AnalyzeKey::new(&request, &params).cache_key();
+        Self {
+            state,
+            _active: ActiveRequestGuard::new(Arc::clone(state)),
+            request: Arc::new(request),
+            params,
+            cache_key,
+            started: Instant::now(),
+            in_flight: None,
+        }
+    }
+
+    /// 主流程：任一阶段命中即返回，否则落到阻塞计算。
+    async fn execute(mut self) -> Result<AnalyzeResponse> {
+        if let Some(response) = self.try_cached().await {
+            return Ok(response);
+        }
+        if let Some(response) = self.await_in_flight().await {
+            return Ok(response);
+        }
+        self.register_in_flight();
+
+        let slot = self.acquire_slot().await?;
+        if let Some(response) = self.recheck_cache().await {
+            return Ok(response);
+        }
+        self.compute(slot).await
+    }
+
+    /// 阶段 1：`prefer_cached` 请求直接读缓存。
+    async fn try_cached(&self) -> Option<AnalyzeResponse> {
+        if !self.request.prefer_cached {
+            return None;
+        }
+        let snapshot = self.state.cache().read().await.get(&self.cache_key)?;
+        Some(Self::cached_response(snapshot, CacheState::Hit, 0))
+    }
+
+    /// 阶段 2：singleflight。同数据段并发首刷合并为一次分析；最多等待两轮，
+    /// 两轮无果直接接管（不登记，避免泄漏）。
+    async fn await_in_flight(&self) -> Option<AnalyzeResponse> {
+        let mut attempts = 0;
+        while self.has_in_flight() {
+            attempts += 1;
+            if attempts > 2 {
+                return None;
+            }
+            if let Some(response) = self.wait_once().await {
+                return Some(response);
+            }
+        }
+        None
+    }
+
+    fn has_in_flight(&self) -> bool {
+        self.state.in_flight().lock().contains_key(&self.cache_key)
+    }
+
+    /// 等待同数据段在途分析并重查缓存；15s 超时兜底，防分析方崩溃导致挂死。
+    async fn wait_once(&self) -> Option<AnalyzeResponse> {
+        let notify = self
+            .state
+            .in_flight()
+            .lock()
+            .get(&self.cache_key)
+            .cloned()?;
+        let _ = tokio::time::timeout(Duration::from_secs(15), notify.notified()).await;
+
+        let snapshot = self.state.cache().read().await.get(&self.cache_key)?;
+        Some(Self::cached_response(
+            snapshot,
+            CacheState::Miss,
+            self.elapsed_ms(),
+        ))
+    }
+
+    /// 阶段 3：登记在途（双检：等待期间可能已被其它请求抢先登记）。
+    fn register_in_flight(&mut self) {
+        self.in_flight = Some(InFlightSlot::register(self.state, &self.cache_key));
+    }
+
+    /// 阶段 4：取得并发分析槽，防多窗口同时全量分析打满 CPU。
+    async fn acquire_slot(&self) -> Result<OwnedSemaphorePermit> {
+        self.state
+            .analysis_slots()
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow!("analysis semaphore closed"))
+    }
+
+    /// 阶段 5：等槽期间在途分析可能已完成，复查缓存避免重复计算。
+    async fn recheck_cache(&self) -> Option<AnalyzeResponse> {
+        let snapshot = self.state.cache().read().await.get(&self.cache_key)?;
+        Some(Self::cached_response(
+            snapshot,
+            CacheState::Miss,
+            self.elapsed_ms(),
+        ))
+    }
+
+    /// 阶段 6：在阻塞线程池执行分析；先写缓存再唤醒等待者。
+    async fn compute(mut self, _slot: OwnedSemaphorePermit) -> Result<AnalyzeResponse> {
+        let request = Arc::clone(&self.request);
+        let params = Arc::clone(&self.params);
+        let state = Arc::clone(self.state);
+        let mode = IncrementalMode::resolve(
+            self.state.config().enable_incremental,
+            self.request.options.as_ref(),
+        );
+
+        let outcome =
+            tokio::task::spawn_blocking(move || state.analysis().analyze(&request, &params, mode))
+                .await
+                .map_err(|err| anyhow!("analysis task join failed: {err}"))??;
+
+        if outcome.evolution.is_full() {
+            self.state.record_full_analysis();
+        }
+
+        let snapshot = Arc::new(outcome.snapshot);
+        {
+            let mut cache = self.state.cache().write().await;
+            cache.insert(self.cache_key.clone(), Arc::clone(&snapshot));
+        }
+        if let Some(slot) = self.in_flight.as_mut() {
+            slot.release();
+        }
+
+        Ok(Self::computed_response(
+            Arc::unwrap_or_clone(snapshot),
+            self.elapsed_ms(),
+        ))
+    }
+
+    fn elapsed_ms(&self) -> u32 {
+        u32::try_from(self.started.elapsed().as_millis()).unwrap_or(u32::MAX)
+    }
+
+    /// 缓存响应：901 由 `cache` 决定（只有未经等待/计算的直接命中才是 1）。
+    fn cached_response(
+        snapshot: Arc<AnalysisSnapshot>,
+        cache: CacheState,
+        latency_ms: u32,
+    ) -> AnalyzeResponse {
+        let mut snapshot = Arc::unwrap_or_clone(snapshot);
+        SnapshotPatch {
+            cache,
+            latency_ms: latency_ms as f32,
+        }
+        .apply(&mut snapshot);
+        AnalyzeResponse {
+            snapshot: Some(snapshot),
+            service_cache_hit: true,
+            timing: Some(Timing::cached(latency_ms)),
+        }
+    }
+
+    /// 计算响应：901 恒 0，耗时统计两段相等。
+    fn computed_response(mut snapshot: AnalysisSnapshot, latency_ms: u32) -> AnalyzeResponse {
+        SnapshotPatch {
+            cache: CacheState::Miss,
+            latency_ms: latency_ms as f32,
+        }
+        .apply(&mut snapshot);
+        AnalyzeResponse {
+            snapshot: Some(snapshot),
+            service_cache_hit: false,
+            timing: Some(Timing::computed(latency_ms)),
+        }
     }
 }
 
-pub async fn handle(state: &Arc<AppState>, request: AnalyzeRequest) -> Result<AnalyzeResponse> {
-    let started = Instant::now();
-    let _guard = ActiveRequestGuard::new(state.clone());
-    let options = request.options.unwrap_or_default();
-
-    let cache_key = CacheKey {
-        func_group: request.func_group.clone(),
-        input_hash: request.input_hash,
-        data_len: request.data_len,
-        freq_hint: request.freq_hint.clone(),
-        max_bi_num: if options.max_bi_num > 0 {
-            options.max_bi_num
-        } else {
-            state.config.max_bi_num
-        },
-        min_bi_len: if options.min_bi_len > 0 {
-            options.min_bi_len
-        } else {
-            state.config.min_bi_len
-        },
-        analysis_window: if options.analysis_window > 0 {
-            options.analysis_window
-        } else {
-            state.config.default_analysis_window
-        },
-    };
-
-    // 1) 已有分析结果：直接命中缓存返回
-    if request.prefer_cached {
-        let cache = state.cache.read().await;
-        if let Some(mut snapshot) = cache.get(&cache_key) {
-            drop(cache);
-            patch_debug_channels(&mut snapshot.channels, true, 0.0);
-            return Ok(AnalyzeResponse {
-                snapshot: Some(snapshot),
-                service_cache_hit: true,
-                timing: Some(timing_stats(started.elapsed().as_millis() as u32, 0)),
-            });
-        }
-    }
-
-    // 2) singleflight：通达信多窗口/多公式对同一数据段并发首刷时，
-    //    合并为一次全量分析。最多等待两轮；两轮均无果则直接接管分析。
-    let mut registered = false;
-    let mut attempts = 0;
-    loop {
-        // 仅探测是否已有同数据段在途分析；实际等待在 await_in_flight_result
-        // 内部完成（拿到 Notify 后 notified() 超时等待）。
-        let has_in_flight = state.in_flight.lock().unwrap().contains_key(&cache_key);
-        if !has_in_flight {
-            break;
-        }
-        attempts += 1;
-        if attempts > 2 {
-            break; // 双轮在途等待无果：直接分析兜底（不登记，避免泄漏）
-        }
-        if let Some(resp) = await_in_flight_result(state, &cache_key, started).await {
-            return Ok(resp);
-        }
-    }
-    if !registered {
-        // 双检登记：等待期间可能已有请求抢先登记
-        let mut lock = state.in_flight.lock().unwrap();
-        if !lock.contains_key(&cache_key) {
-            lock.insert(cache_key.clone(), Arc::new(tokio::sync::Notify::new()));
-            registered = true;
-        }
-        drop(lock);
-    }
-
-    // 3) 并发上限：等待可用分析槽（防止多窗口同时全量分析打满 CPU）
-    let _slot = state
-        .analysis_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| anyhow!("analysis semaphore closed"))?;
-
-    // 4) 复查缓存：等槽期间在途分析可能已完成（本请求无需重复分析）
-    {
-        let cache = state.cache.read().await;
-        if let Some(mut snapshot) = cache.get(&cache_key) {
-            drop(cache);
-            if registered {
-                release_in_flight(state, &cache_key);
-            }
-            let elapsed_ms = started.elapsed().as_millis() as u32;
-            patch_debug_channels(&mut snapshot.channels, false, elapsed_ms as f32);
-            return Ok(AnalyzeResponse {
-                snapshot: Some(snapshot),
-                service_cache_hit: true,
-                timing: Some(timing_stats(elapsed_ms, 0)),
-            });
-        }
-    }
-
-    // 5) 分析（CPU 密集）在阻塞线程池执行，不占用 runtime worker；
-    //    开启增量时优先增量承接（前缀一致只演化新增 K 线，稳态 O(新增)），
-    //    未命中回退全量；分析参数由请求 + 配置解析。
-    let analyze_request = request.clone();
-    let analyze_state = state.clone();
-    let analyze = tokio::task::spawn_blocking(move || -> Result<_> {
-        let params = analyzer::AnalysisParams::from((&analyze_request, &analyze_state.config));
-        analyze_snapshot(&analyze_request, &params, &analyze_state)
-    })
-    .await
-    .map_err(|err| anyhow!("analysis task join failed: {err}"))?;
-
-    let mut snapshot = match analyze {
-        Ok((snapshot, is_full)) => {
-            if is_full {
-                state.total_analyses.fetch_add(1, Ordering::Relaxed);
-            }
-            snapshot
-        }
-        Err(err) => {
-            if registered {
-                release_in_flight(state, &cache_key);
-            }
-            return Err(err);
-        }
-    };
-
-    // 6) 写缓存并唤醒同数据段的等待者（无论如何都通知）
-    if registered {
-        release_in_flight(state, &cache_key);
-    }
-    {
-        let mut cache = state.cache.write().await;
-        cache.insert(cache_key, snapshot.clone());
-    }
-
-    let elapsed_ms = started.elapsed().as_millis() as u32;
-    patch_debug_channels(&mut snapshot.channels, false, elapsed_ms as f32);
-
-    Ok(AnalyzeResponse {
-        snapshot: Some(snapshot),
-        service_cache_hit: false,
-        timing: Some(timing_stats(elapsed_ms, elapsed_ms)),
-    })
+/// 缓存键构造：请求选项优先、配置兜底（与 [`AnalysisParams`] 同一解析规则）。
+struct AnalyzeKey<'a> {
+    request: &'a AnalyzeRequest,
+    params: &'a AnalysisParams,
 }
 
-/// 增量或全量分析入口（在 spawn_blocking 中执行）。返回 (快照, 是否全量)。
+impl<'a> AnalyzeKey<'a> {
+    fn new(request: &'a AnalyzeRequest, params: &'a AnalysisParams) -> Self {
+        Self { request, params }
+    }
+
+    fn cache_key(&self) -> CacheKey {
+        let resolved = ResolvedParams::from_request(self.request, self.params);
+        let mut requested_func_ids = self.request.requested_func_ids.clone();
+        requested_func_ids.sort_unstable();
+        requested_func_ids.dedup();
+        CacheKey {
+            func_group: self.request.func_group.clone(),
+            input_hash: self.request.input_hash,
+            data_len: self.request.data_len,
+            freq_hint: self.request.freq_hint.clone(),
+            max_bi_num: resolved.max_bi_num,
+            min_bi_len: resolved.min_bi_len,
+            analysis_window: resolved.window.bars(),
+            requested_func_ids,
+            include_objects: self
+                .request
+                .options
+                .as_ref()
+                .is_some_and(|options| options.include_objects),
+        }
+    }
+}
+
+/// 在途分析登记（RAII）：析构即移除登记并唤醒等待者。
 ///
-/// 增量路径（`config.enable_incremental`（默认开）或请求显式开启）：
-/// 先构建窗口 K 线（O(窗口)，数百微秒量级），从 `IncrementalCache`
-/// 取出匹配状态并 `accept`：命中且前缀一致则只演化新增 K 线（或等长
-/// 末笔原地更新），随后装配快照并把演化后的状态放回缓存；
-/// 无法承接（无状态/前缀不一致/评估器缺失）时执行全量演化，同时
-/// 建立增量状态供后续请求承接。输出与全量路径完全一致。
-///
-/// 非增量路径保持 `build_snapshot` 原样调用。
-fn analyze_snapshot(
-    request: &AnalyzeRequest,
-    params: &analyzer::AnalysisParams,
-    state: &AppState,
-) -> Result<(AnalysisSnapshot, bool)> {
-    let incremental_active = state.config.enable_incremental
-        || request
-            .options
-            .as_ref()
-            .is_some_and(|o| o.enable_incremental);
-    if !incremental_active {
-        let snapshot = analyzer::build_snapshot(request, params)?;
-        return Ok((snapshot, true));
-    }
-
-    // —— 增量路径（默认开启）——
-    analyzer::validate_series_lengths(
-        request.data_len,
-        request
-            .series
-            .as_ref()
-            .ok_or_else(|| anyhow!("market series is missing"))?,
-    )?;
-    let freq = analyzer::parse_freq(&request.freq_hint)?;
-    let data_len = request.data_len as usize;
-    let window_start = analyzer::window_start_of(data_len, params.analysis_window);
-    let window_bars =
-        analyzer::build_raw_bars(request, freq, window_start, params.derive_volume_proxy)?;
-    if window_bars.is_empty() {
-        return Err(anyhow!("bars are empty after applying analysis window"));
-    }
-
-    let wants_signals = request
-        .requested_func_ids
-        .iter()
-        .any(|id| (401..=406).contains(id));
-    let max_bi_num = params.max_bi_num as usize;
-    let min_bi_len = params.min_bi_len as usize;
-
-    let key = IncrementalKey {
-        freq_hint: request.freq_hint.clone(),
-        max_bi_num: params.max_bi_num,
-        min_bi_len: params.min_bi_len,
-        analysis_window: params.analysis_window,
-    };
-
-    // 1) 尝试增量承接：取出 →（锁外演化）→ 放回。
-    //    并发取出同一条目时后取者得到 None 走全量，放入总是完整状态。
-    //    注意：take 的 MutexGuard 是临时值，必须独立成语句，否则其生命周期
-    //    会延伸到整个 if-let（内部再 lock() 导致 std Mutex 自死锁）。
-    let taken = state.incremental.lock().unwrap().take(&key);
-    if let Some(mut st) = taken {
-        if st.accept(&window_bars, wants_signals) == AcceptOutcome::Served {
-            let points = st.signals();
-            let snapshot = analyzer::assemble_snapshot(
-                request, params, freq, max_bi_num, min_bi_len, &st.czsc, points,
-            )?;
-            state.incremental.lock().unwrap().put(key.clone(), st);
-            return Ok((snapshot, false));
-        }
-        // 不适用：放回缓存（后续可承接的请求仍可复用）
-        state.incremental.lock().unwrap().put(key.clone(), st);
-    }
-
-    // 2) 全量演化（首建或无法承接），同时建立增量状态供后续承接。
-    let (czsc, mut evaluator) =
-        analyzer::evolve_bars(&window_bars, max_bi_num, min_bi_len, wants_signals);
-    let buy_sell_points = match evaluator.as_mut() {
-        Some(ev) => ev.finalize_points(&czsc),
-        None => Vec::new(),
-    };
-    let snapshot = analyzer::assemble_snapshot(
-        request,
-        params,
-        freq,
-        max_bi_num,
-        min_bi_len,
-        &czsc,
-        buy_sell_points,
-    )?;
-    state
-        .incremental
-        .lock()
-        .unwrap()
-        .put(key, IncrementalState::new(window_bars, czsc, evaluator));
-    Ok((snapshot, true))
+/// `key` 为 `None` 表示等待期间已被其它请求抢先登记：本请求不持有登记，
+/// 析构时无操作。
+struct InFlightSlot {
+    state: Arc<AppState>,
+    key: Option<CacheKey>,
 }
 
+impl InFlightSlot {
+    /// 双检登记：已存在同键在途分析时不登记（避免覆盖在途方的 `Notify`）。
+    fn register(state: &Arc<AppState>, key: &CacheKey) -> Self {
+        let key = {
+            let mut slots = state.in_flight().lock();
+            match slots.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => None,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    let key = slot.key().clone();
+                    slot.insert(Arc::new(tokio::sync::Notify::new()));
+                    Some(key)
+                }
+            }
+        };
+        Self {
+            state: Arc::clone(state),
+            key,
+        }
+    }
+
+    /// 释放登记并唤醒等待者（幂等）；应在缓存写入之后调用。
+    fn release(&mut self) {
+        let Some(key) = self.key.take() else {
+            return;
+        };
+        if let Some(notify) = self.state.in_flight().lock().remove(&key) {
+            notify.notify_waiters();
+        }
+    }
+}
+
+impl Drop for InFlightSlot {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// 在途请求计数守卫（健康检查的 `active_requests`）。
 struct ActiveRequestGuard {
     state: std::sync::Arc<AppState>,
 }
 
 impl ActiveRequestGuard {
     fn new(state: std::sync::Arc<AppState>) -> Self {
-        state
-            .active_requests
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.begin_request();
         Self { state }
     }
 }
 
 impl Drop for ActiveRequestGuard {
     fn drop(&mut self) {
-        self.state
-            .active_requests
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.state.end_request();
     }
 }
 
@@ -362,6 +363,13 @@ mod tests {
         AppState::new(config)
     }
 
+    async fn analyze(
+        state: &std::sync::Arc<AppState>,
+        request: AnalyzeRequest,
+    ) -> anyhow::Result<AnalyzeResponse> {
+        Handlers::new(state.clone()).analyze(request).await
+    }
+
     fn channel_values(response: &AnalyzeResponse, func_id: u32) -> &Vec<f32> {
         &response
             .snapshot
@@ -378,7 +386,7 @@ mod tests {
     async fn handle_patches_debug_channels_and_hits_cache() {
         let state = state();
 
-        let first = handle(&state, sample_request(false))
+        let first = analyze(&state, sample_request(false))
             .await
             .expect("first analyze should succeed");
         assert!(!first.service_cache_hit);
@@ -386,7 +394,7 @@ mod tests {
         assert!(channel_values(&first, 902).iter().all(|x| *x == 1.0));
         assert!(channel_values(&first, 903).iter().any(|x| *x >= 0.0));
 
-        let second = handle(&state, sample_request(true))
+        let second = analyze(&state, sample_request(true))
             .await
             .expect("second analyze should succeed");
         assert!(second.service_cache_hit);
@@ -398,20 +406,20 @@ mod tests {
     #[tokio::test]
     async fn concurrent_same_key_requests_share_single_analysis() {
         let state = state();
-        let before = state.total_analyses.load(Ordering::Relaxed);
+        let before = state.total_analyses();
 
         let mut tasks = Vec::new();
         for _ in 0..4 {
             let st = state.clone();
             let req = sample_request(false);
-            tasks.push(tokio::spawn(async move { handle(&st, req).await }));
+            tasks.push(tokio::spawn(async move { analyze(&st, req).await }));
         }
         for task in tasks {
-            let resp = task.await.expect("task join").expect("handle ok");
+            let resp = task.await.expect("task join").expect("analyze ok");
             assert!(resp.service_cache_hit || !resp.snapshot.as_ref().unwrap().channels.is_empty());
         }
 
-        let after = state.total_analyses.load(Ordering::Relaxed);
+        let after = state.total_analyses();
         assert_eq!(
             after - before,
             1,
@@ -427,21 +435,84 @@ mod tests {
         let mut tasks = Vec::new();
         for req in reqs {
             let st = state.clone();
-            tasks.push(tokio::spawn(async move { handle(&st, req).await }));
+            tasks.push(tokio::spawn(async move { analyze(&st, req).await }));
         }
         for task in tasks {
             task.await.unwrap().unwrap();
         }
 
-        let before = state.total_analyses.load(Ordering::Relaxed);
-        let resp = handle(&state, sample_request(true))
+        let before = state.total_analyses();
+        let resp = analyze(&state, sample_request(true))
             .await
             .expect("cached request should succeed");
         assert!(resp.service_cache_hit);
         assert_eq!(
-            state.total_analyses.load(Ordering::Relaxed),
+            state.total_analyses(),
             before,
             "缓存命中不得触发新的全量分析"
+        );
+    }
+
+    /// 缓存键解析：请求选项 > 0 时优先，否则回退配置默认值。
+    #[test]
+    fn cache_key_prefers_request_options_over_config() {
+        let state = state();
+
+        let custom = sample_request(false);
+        let params = AnalysisParams::from(state.config());
+        let key = AnalyzeKey::new(&custom, &params).cache_key();
+        assert_eq!(key.max_bi_num, 50);
+        assert_eq!(key.min_bi_len, 3);
+        assert_eq!(key.analysis_window, 64);
+
+        let mut defaulted = sample_request(false);
+        defaulted.options = Some(crate::proto::analysis::CzscOptions::default());
+        let params = AnalysisParams::from(state.config());
+        let key = AnalyzeKey::new(&defaulted, &params).cache_key();
+        assert_eq!(key.max_bi_num, state.config().max_bi_num);
+        assert_eq!(key.min_bi_len, state.config().min_bi_len);
+        assert_eq!(key.analysis_window, state.config().default_analysis_window);
+    }
+
+    /// 在途登记：同键只登记一次，析构时移除并唤醒等待者。
+    #[tokio::test]
+    async fn in_flight_slot_registers_once_and_wakes_waiters_on_drop() {
+        let state = state();
+        let key = CacheKey {
+            func_group: "single_level_structure".to_string(),
+            input_hash: 1,
+            data_len: 64,
+            freq_hint: "F30".to_string(),
+            max_bi_num: 50,
+            min_bi_len: 3,
+            analysis_window: 64,
+            requested_func_ids: vec![101, 901, 902, 903],
+            include_objects: false,
+        };
+
+        let first = InFlightSlot::register(&state, &key);
+        assert!(first.key.is_some());
+        let second = InFlightSlot::register(&state, &key);
+        assert!(second.key.is_none(), "同键不应重复登记");
+
+        let notify = state.in_flight().lock().get(&key).cloned().expect("已登记");
+
+        // `join!` 先轮询等待方（完成 `Notify` 注册），再释放登记，避免通知丢失。
+        tokio::join!(
+            async {
+                tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                    .await
+                    .expect("析构应唤醒等待者");
+            },
+            async {
+                drop(second);
+                assert!(
+                    state.in_flight().lock().contains_key(&key),
+                    "非持有者析构不得移除他人登记"
+                );
+                drop(first);
+                assert!(!state.in_flight().lock().contains_key(&key));
+            }
         );
     }
 }

@@ -98,12 +98,20 @@ bool ParseSize(const std::string& text, std::size_t* out) {
 }
 
 const char* EnvValue(const char* name) {
-    static thread_local char buffer[128]{};
-    const DWORD size = GetEnvironmentVariableA(name, buffer, sizeof(buffer));
-    if (size == 0 || size >= sizeof(buffer)) {
+    // 不设固定 128 字节上限：超长值（如很深的 service_exe 路径）以前会被
+    // 静默当成「未设置」，回落默认值。返回值指向 thread_local 缓冲，调用方需立即使用。
+    static thread_local std::string buffer;
+    const DWORD size = GetEnvironmentVariableA(name, nullptr, 0);
+    if (size == 0) {
         return nullptr;
     }
-    return buffer;
+    buffer.resize(size);
+    const DWORD copied = GetEnvironmentVariableA(name, buffer.data(), size);
+    if (copied == 0 || copied >= size) {
+        return nullptr;
+    }
+    buffer.resize(copied);
+    return buffer.c_str();
 }
 
 /// 对单个配置项应用：INI 值 < 环境变量 < 调用方。

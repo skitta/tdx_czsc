@@ -19,6 +19,10 @@
 namespace tdx_czsc {
 namespace {
 
+/// 单帧响应体上限：服务端正常响应远小于此值，超过即视为协议错位/异常对端，
+/// 避免一个损坏的 4 字节长度让 DLL 按 4GB 分配内存。
+constexpr std::uint32_t kMaxResponseFrameBytes = 64u * 1024u * 1024u;
+
 std::string WideToUtf8(const std::wstring& input) {
     if (input.empty()) {
         return {};
@@ -450,13 +454,20 @@ bool BridgeIpcClient::IoWithTimeout(HANDLE pipe,
     }
 
     const auto cleanup = [&overlapped]() { CloseHandle(overlapped.hEvent); };
+    // 取消是异步的：必须等操作真正结束后才能释放缓冲区与事件，
+    // 否则内核可能继续写入调用方已释放的栈/堆内存。
+    const auto cancel_and_reap = [&]() {
+        CancelIoEx(pipe, &overlapped);
+        DWORD reaped = 0;
+        GetOverlappedResult(pipe, &overlapped, &reaped, TRUE);
+    };
 
     BOOL ok = is_write ? WriteFile(pipe, buffer, bytes_to_transfer, nullptr, &overlapped)
                        : ReadFile(pipe, buffer, bytes_to_transfer, nullptr, &overlapped);
     if (!ok && GetLastError() == ERROR_IO_PENDING) {
         const DWORD wait = WaitForSingleObject(overlapped.hEvent, config_.request_timeout_ms);
         if (wait == WAIT_TIMEOUT) {
-            CancelIoEx(pipe, &overlapped);
+            cancel_and_reap();
             cleanup();
             if (out_error != nullptr) {
                 *out_error = std::string(is_write ? "WriteFile" : "ReadFile") +
@@ -466,7 +477,7 @@ bool BridgeIpcClient::IoWithTimeout(HANDLE pipe,
             return false;
         }
         if (wait != WAIT_OBJECT_0) {
-            CancelIoEx(pipe, &overlapped);
+            cancel_and_reap();
             cleanup();
             if (out_error != nullptr) {
                 *out_error = "WaitForSingleObject failed error=" + std::to_string(GetLastError());
@@ -534,6 +545,13 @@ bool BridgeIpcClient::ReadFrame(void* pipe_handle,
 
     if (!IoWithTimeout(pipe, false, &payload_size, sizeof(payload_size), &read, out_error) ||
         read != sizeof(payload_size)) {
+        return false;
+    }
+
+    if (payload_size > kMaxResponseFrameBytes) {
+        if (out_error != nullptr) {
+            *out_error = "response frame too large: " + std::to_string(payload_size) + " bytes";
+        }
         return false;
     }
 

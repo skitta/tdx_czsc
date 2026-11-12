@@ -49,6 +49,9 @@ flowchart LR
     A -.->|显示| G[主图标注：分型/笔/中枢/段/买卖点]
 ```
 
+> 服务内部模块划分、请求时序、分析流水线与并发/缓存结构见
+> [`docs/rust_service_架构.md`](docs/rust_service_架构.md)。
+
 **设计原则**
 
 - **算法在服务端**：缠论计算全部由 Rust 服务承担，通达信公式层只做显示；
@@ -367,6 +370,7 @@ cargo run --example analyze_csv -- ../tests/data/002340_day.csv 6
 |---|---|
 | [`docs/使用说明.md`](docs/使用说明.md) | 部署、通达信系统设置、公式导入、日常使用与常见问题 |
 | [`docs/技术方案_通达信缠论自动标注系统.md`](docs/技术方案_通达信缠论自动标注系统.md) | 总体方案：协议、通道设计、中枢/段绘制规则、配置与验收 |
+| [`docs/rust_service_架构.md`](docs/rust_service_架构.md) | Rust 服务内部架构图：模块依赖、启动与请求时序、分析流水线、并发与缓存结构 |
 | [`docs/通达信DLL函数编程规范/`](docs/通达信DLL函数编程规范) | 通达信官方 DLL 编程规范与示例插件（**第三方材料，版权归官方**，见目录内 README） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
 | [`SECURITY.md`](SECURITY.md) | 漏洞报告与安全注意事项 |

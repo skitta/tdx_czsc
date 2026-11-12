@@ -19,6 +19,9 @@ add_library(tdx_czsc_bridge SHARED
     src/bridge_functions.cpp
     src/bridge_cache.cpp
     src/bridge_config.cpp
+    src/bridge_proto_mapping.cpp
+    src/bridge_service_launcher.cpp
+    src/bridge_text.cpp
     src/bridge_ipc_client.cpp
     src/bridge_logging.cpp
     src/bridge_output_mapper.cpp
@@ -29,6 +32,7 @@ add_library(tdx_czsc_bridge SHARED
 target_include_directories(tdx_czsc_bridge
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -57,6 +61,9 @@ add_executable(tdx_czsc_ipc_smoke_test
     tests/ipc_client_smoke.cpp
     src/bridge_functions.cpp
     src/bridge_cache.cpp
+    src/bridge_proto_mapping.cpp
+    src/bridge_service_launcher.cpp
+    src/bridge_text.cpp
     src/bridge_ipc_client.cpp
     src/bridge_config.cpp
     src/bridge_logging.cpp
@@ -87,6 +94,7 @@ endif()
 target_include_directories(tdx_czsc_ipc_smoke_test
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_BINARY_DIR}
 )
 
@@ -105,3 +113,23 @@ else()
     target_include_directories(tdx_czsc_ipc_smoke_test PRIVATE ${Protobuf_INCLUDE_DIRS})
     target_link_libraries(tdx_czsc_ipc_smoke_test PRIVATE ${Protobuf_LIBRARIES})
 endif()
+
+# 纯逻辑单测（不依赖服务端/管道），由 ctest 执行。
+enable_testing()
+
+function(tdx_czsc_add_unit_test name)
+    add_executable(${name} tests/${name}.cpp ${ARGN})
+    target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(${name} PRIVATE cxx_std_20)
+    target_compile_definitions(${name} PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    if(MSVC)
+        target_compile_options(${name} PRIVATE /W4 /EHsc /utf-8)
+    else()
+        target_compile_options(${name} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+tdx_czsc_add_unit_test(cache_test src/bridge_cache.cpp)
+tdx_czsc_add_unit_test(output_mapper_test src/bridge_output_mapper.cpp)
+tdx_czsc_add_unit_test(config_test src/bridge_config.cpp src/bridge_text.cpp)

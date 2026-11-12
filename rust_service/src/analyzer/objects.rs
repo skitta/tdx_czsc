@@ -18,6 +18,7 @@ use czsc_core::objects::fx::FX;
 use czsc_core::objects::mark::Mark;
 use czsc_core::objects::zs::ZS;
 
+use crate::analyzer::pivots::SegmentPivot;
 use crate::analyzer::segs::Segment;
 use crate::proto::analysis::{
     Direction as ProtoDirection, FractalMark, FractalPoint, PivotZone, Segment as ProtoSegment,
@@ -153,6 +154,22 @@ impl TryFrom<&ZS> for PivotZone {
             upper: zs.zg,
             lower: zs.zd,
             middle: zs.zz,
+        })
+    }
+}
+
+impl TryFrom<&SegmentPivot> for PivotZone {
+    type Error = AlignError;
+
+    fn try_from(pivot: &SegmentPivot) -> Result<Self, Self::Error> {
+        let (start_index, end_index) = pivot.span().ok_or(AlignError)?;
+
+        Ok(PivotZone {
+            start_index: start_index as u32,
+            end_index: end_index as u32,
+            upper: pivot.zg,
+            lower: pivot.zd,
+            middle: pivot.zz,
         })
     }
 }

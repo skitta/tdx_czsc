@@ -277,7 +277,10 @@ impl InFlightSlot {
             return;
         };
         if let Some(notify) = self.state.in_flight().lock().remove(&key) {
+            // `notify_waiters` 不保存许可：同时存一个许可，兜住已克隆
+            // `Notify` 但尚未首次 poll 的等待者，避免其空等 15s 超时。
             notify.notify_waiters();
+            notify.notify_one();
         }
     }
 }
@@ -514,5 +517,31 @@ mod tests {
                 assert!(!state.in_flight().lock().contains_key(&key));
             }
         );
+    }
+
+    /// 迟到的等待者：`notify_waiters` 不存许可，`release` 必须额外存一个许可，
+    /// 否则已克隆 `Notify` 但尚未首次 poll 的等待者会跑满 15s 超时。
+    #[tokio::test]
+    async fn release_stores_permit_for_late_waiters() {
+        let state = state();
+        let key = CacheKey {
+            func_group: "single_level_structure".to_string(),
+            input_hash: 1,
+            data_len: 64,
+            freq_hint: "F30".to_string(),
+            max_bi_num: 50,
+            min_bi_len: 3,
+            analysis_window: 64,
+            requested_func_ids: vec![101, 901, 902, 903],
+            include_objects: false,
+        };
+
+        let slot = InFlightSlot::register(&state, &key);
+        let notify = state.in_flight().lock().get(&key).cloned().expect("已登记");
+        drop(slot);
+
+        tokio::time::timeout(Duration::from_millis(50), notify.notified())
+            .await
+            .expect("迟到的等待者应立即被唤醒");
     }
 }

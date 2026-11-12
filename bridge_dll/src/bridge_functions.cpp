@@ -11,6 +11,7 @@
 
 #include "bridge_cache.h"
 #include "bridge_config.h"
+#include "bridge_func_ids.h"
 #include "bridge_ipc_client.h"
 #include "bridge_logging.h"
 #include "bridge_output_mapper.h"
@@ -146,7 +147,9 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
                                float* in_close) {
     AnalyzeRequestCpp request;
     request.request_id = Runtime().request_counter.fetch_add(1, std::memory_order_relaxed);
-    request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903};
+#define TDX_CZSC_FUNC_ID(ID) ID,
+    request.requested_func_ids = {TDX_CZSC_ANALYSIS_FUNCS(TDX_CZSC_FUNC_ID)};
+#undef TDX_CZSC_FUNC_ID
     request.data_len = data_len > 0 ? static_cast<uint32_t>(data_len) : 0;
     request.input_hash = ComputeInputHash(data_len, in_high, in_low, in_close);
 
@@ -176,19 +179,21 @@ AnalyzeRequestCpp BuildRequest(uint32_t func_id,
         request.close.assign(in_close, in_close + data_len);
     }
 
-    // 调试: 记录通达信传入的数据长度与首尾价格, 用于排查对齐/偏移问题
-    // 热路径日志：每次通道调用都会走到，默认只写文件不产生额外开销由 LogDebug 门控。
-    LogDebug("BuildRequest func_id=" + std::to_string(func_id) + " data_len=" +
-            std::to_string(data_len) + " first_close=" +
-            (data_len > 0 ? std::to_string(in_close[0]) : "?") + " last_close=" +
-            (data_len > 0 ? std::to_string(in_close[data_len - 1]) : "?") +
-            " first_low=" + (data_len > 0 ? std::to_string(in_low[0]) : "?") +
-            " last_low=" + (data_len > 0 ? std::to_string(in_low[data_len - 1]) : "?") +
-            " vol_fused=" + std::to_string(request.vol.size()) +
-            (request.vol.empty()
-                 ? ""
-                 : (" first_vol=" + std::to_string(request.vol.front()) +
-                    " last_vol=" + std::to_string(request.vol.back()))));
+    // 调试: 记录通达信传入的数据长度与首尾价格, 用于排查对齐/偏移问题。
+    // 热路径（每次通道调用都会走到）：默认不拼消息，TDX_CZSC_LOG_DEBUG=1 才输出。
+    if (DebugLoggingEnabled()) {
+        LogDebug("BuildRequest func_id=" + std::to_string(func_id) + " data_len=" +
+                 std::to_string(data_len) + " first_close=" +
+                 (data_len > 0 ? std::to_string(in_close[0]) : "?") + " last_close=" +
+                 (data_len > 0 ? std::to_string(in_close[data_len - 1]) : "?") +
+                 " first_low=" + (data_len > 0 ? std::to_string(in_low[0]) : "?") +
+                 " last_low=" + (data_len > 0 ? std::to_string(in_low[data_len - 1]) : "?") +
+                 " vol_fused=" + std::to_string(request.vol.size()) +
+                 (request.vol.empty()
+                      ? ""
+                      : (" first_vol=" + std::to_string(request.vol.front()) +
+                         " last_vol=" + std::to_string(request.vol.back()))));
+    }
 
     // 目前所有 func_id 都归属 single_level_structure。
     // 后续有真实买卖点时，可拆出 signal group。
@@ -208,31 +213,15 @@ CacheKey BuildCacheKey(const AnalyzeRequestCpp& request) {
     return key;
 }
 
-#define DECLARE_FUNC_WRAPPER(ID)                                      \
-    void Func##ID(int data_len, float* out_values, float* in_high,    \
-                  float* in_low, float* in_close) {                   \
-        HandleFunc(ID, data_len, out_values, in_high, in_low, in_close); \
+#define TDX_CZSC_DECLARE_WRAPPER(ID)                                               \
+    void Func##ID(int data_len, float* out_values, float* in_high, float* in_low,   \
+                  float* in_close) {                                               \
+        HandleFunc(ID, data_len, out_values, in_high, in_low, in_close);            \
     }
 
-DECLARE_FUNC_WRAPPER(101)
-DECLARE_FUNC_WRAPPER(102)
-DECLARE_FUNC_WRAPPER(201)
-DECLARE_FUNC_WRAPPER(202)
-DECLARE_FUNC_WRAPPER(203)
-DECLARE_FUNC_WRAPPER(204)
-DECLARE_FUNC_WRAPPER(301)
-DECLARE_FUNC_WRAPPER(302)
-DECLARE_FUNC_WRAPPER(303)
-DECLARE_FUNC_WRAPPER(304)
-DECLARE_FUNC_WRAPPER(401)
-DECLARE_FUNC_WRAPPER(402)
-DECLARE_FUNC_WRAPPER(403)
-DECLARE_FUNC_WRAPPER(404)
-DECLARE_FUNC_WRAPPER(405)
-DECLARE_FUNC_WRAPPER(406)
-DECLARE_FUNC_WRAPPER(901)
-DECLARE_FUNC_WRAPPER(902)
-DECLARE_FUNC_WRAPPER(903)
+TDX_CZSC_ANALYSIS_FUNCS(TDX_CZSC_DECLARE_WRAPPER)
+
+#undef TDX_CZSC_DECLARE_WRAPPER
 
 /// 量能输入通道（func_id=950）：不发起分析请求，只把第三路输入
 /// （公式传 VOL 序列）按"数据段指纹"缓存，供后续分析请求融合；
@@ -259,29 +248,15 @@ void Func950(int data_len, float* out_values, float* in_high, float* in_low, flo
             " last_vol=" + std::to_string(in_close[data_len - 1]));
 }
 
+#define TDX_CZSC_REGISTRY_ENTRY(ID) {ID, &Func##ID},
+
 PluginTCalcFuncInfo g_calc_funcs[] = {
-    {101, &Func101},
-    {102, &Func102},
-    {201, &Func201},
-    {202, &Func202},
-    {203, &Func203},
-    {204, &Func204},
-    {301, &Func301},
-    {302, &Func302},
-    {303, &Func303},
-    {304, &Func304},
-    {401, &Func401},
-    {402, &Func402},
-    {403, &Func403},
-    {404, &Func404},
-    {405, &Func405},
-    {406, &Func406},
-    {901, &Func901},
-    {902, &Func902},
-    {903, &Func903},
-    {950, &Func950},
+    TDX_CZSC_ANALYSIS_FUNCS(TDX_CZSC_REGISTRY_ENTRY)
+    {kVolumeInputFuncId, &Func950},
     {0, nullptr},
 };
+
+#undef TDX_CZSC_REGISTRY_ENTRY
 
 }  // namespace
 
@@ -310,15 +285,22 @@ void HandleFunc(uint32_t func_id,
 
         AnalysisSnapshotCpp snapshot;
         if (Runtime().cache.TryGet(cache_key, &snapshot)) {
-            snapshot.service_cache_hit = true;
-            FillFromSnapshot(snapshot, func_id, data_len, out_values);
+            if (!FillFromSnapshot(snapshot, func_id, data_len, out_values)) {
+                LogDebug("cached snapshot has no channel func_id=" + std::to_string(func_id) +
+                         " data_len=" + std::to_string(data_len) + " channels=" +
+                         std::to_string(snapshot.channels.size()));
+            }
             return;
         }
 
         std::string error;
         if (Runtime().client.Analyze(request, &snapshot, &error)) {
             Runtime().cache.Put(cache_key, snapshot);
-            FillFromSnapshot(snapshot, func_id, data_len, out_values);
+            if (!FillFromSnapshot(snapshot, func_id, data_len, out_values)) {
+                LogDebug("snapshot has no channel func_id=" + std::to_string(func_id) +
+                         " data_len=" + std::to_string(data_len) + " channels=" +
+                         std::to_string(snapshot.channels.size()));
+            }
             return;
         }
 

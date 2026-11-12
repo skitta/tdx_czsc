@@ -7,12 +7,16 @@
 #include <vector>
 
 #include "bridge_functions.h"
+#include "bridge_func_ids.h"
 #include "bridge_ipc_client.h"
 #include "bridge_config.h"
 #include "bridge_logging.h"
 #include "bridge_service_protocol.h"
+#include "bridge_text.h"
 
 namespace {
+
+using tdx_czsc::WideToUtf8;
 
 std::string GetEnvOrDefault(const char* name, const std::string& fallback) {
     // MSVC 将 getenv 标记为弃用（C4996），改用 CRT 安全 API。
@@ -24,26 +28,6 @@ std::string GetEnvOrDefault(const char* name, const std::string& fallback) {
         return value.empty() ? fallback : value;
     }
     return fallback;
-}
-
-std::wstring Utf8ToWide(const std::string& input) {
-    return std::wstring(input.begin(), input.end());
-}
-
-std::string WideToUtf8(const std::wstring& input) {
-    if (input.empty()) {
-        return {};
-    }
-    const int size_needed = WideCharToMultiByte(CP_UTF8, 0, input.c_str(),
-                                                static_cast<int>(input.size()), nullptr, 0,
-                                                nullptr, nullptr);
-    if (size_needed <= 0) {
-        return {};
-    }
-    std::string result(static_cast<std::size_t>(size_needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()),
-                        result.data(), size_needed, nullptr, nullptr);
-    return result;
 }
 
 std::vector<float> MakeLinearSeries(float start, float step, std::size_t len) {
@@ -103,7 +87,9 @@ int main() {
     tdx_czsc::AnalyzeRequestCpp request;
     request.request_id = 1;
     request.func_group = "single_level_structure";
-    request.requested_func_ids = {101, 102, 201, 202, 203, 204, 301, 302, 303, 304, 401, 402, 403, 404, 405, 406, 901, 902, 903};
+#define TDX_CZSC_TEST_FUNC_ID(ID) ID,
+    request.requested_func_ids = {TDX_CZSC_ANALYSIS_FUNCS(TDX_CZSC_TEST_FUNC_ID)};
+#undef TDX_CZSC_TEST_FUNC_ID
     request.freq_hint = freq_hint;
     request.data_len = static_cast<std::uint32_t>(kLen);
     request.input_hash = 0x1122334455667788ULL;
@@ -111,8 +97,6 @@ int main() {
     request.options.max_bi_num = 50;
     request.options.min_bi_len = 3;
     request.options.analysis_window = static_cast<std::uint32_t>(kLen);
-    request.options.include_objects = false;
-    request.options.enable_incremental = false;
 
     // 构造一组简单但非完全单调的测试数据，便于服务端产出分型/笔/中枢。
     request.close = {
@@ -204,8 +188,6 @@ int main() {
     std::cout << "Analyze ok\n";
     std::cout << "  input_hash       : " << snapshot.input_hash << '\n';
     std::cout << "  data_len         : " << snapshot.data_len << '\n';
-    std::cout << "  service_cache_hit: " << (snapshot.service_cache_hit ? "true" : "false") << '\n';
-    std::cout << "  latency_ms       : " << snapshot.latency_ms << '\n';
     std::cout << "  channel_count    : " << snapshot.channels.size() << '\n';
 
     PrintChannelPreview(snapshot.channels, 101);

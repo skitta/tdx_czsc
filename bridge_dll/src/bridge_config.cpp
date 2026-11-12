@@ -8,60 +8,10 @@
 
 #include <Windows.h>
 
+#include "bridge_text.h"
+
 namespace tdx_czsc {
 namespace {
-
-std::wstring ModuleDirectory() {
-    wchar_t buffer[MAX_PATH]{};
-    // 必须取 DLL 自身的模块句柄：GetModuleFileNameW(nullptr) 返回的是宿主
-    // 进程（通达信 TdxW.exe）的路径，会错误地把配置/服务路径解析到通达信
-    // 根目录而不是 T0002\dlls。用本模块内函数的地址反查模块句柄。
-    HMODULE module = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       reinterpret_cast<LPCWSTR>(&ModuleDirectory), &module);
-    const DWORD copied = GetModuleFileNameW(module != nullptr ? module : nullptr, buffer, MAX_PATH);
-    if (copied == 0 || copied >= MAX_PATH) {
-        return {};
-    }
-    std::wstring path(buffer);
-    const auto pos = path.find_last_of(L"\\/");
-    if (pos != std::wstring::npos) {
-        path.resize(pos);
-    }
-    return path;
-}
-
-std::string WtoUtf8(const std::wstring& input) {
-    if (input.empty()) {
-        return {};
-    }
-    const int size_needed =
-        WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0,
-                            nullptr, nullptr);
-    if (size_needed <= 0) {
-        return {};
-    }
-    std::string result(static_cast<std::size_t>(size_needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(),
-                        size_needed, nullptr, nullptr);
-    return result;
-}
-
-std::wstring Utf8ToW(const std::string& input) {
-    if (input.empty()) {
-        return {};
-    }
-    const int size_needed = MultiByteToWideChar(CP_UTF8, 0, input.c_str(),
-                                                static_cast<int>(input.size()), nullptr, 0);
-    if (size_needed <= 0) {
-        return {};
-    }
-    std::wstring result(static_cast<std::size_t>(size_needed), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), result.data(),
-                        size_needed);
-    return result;
-}
 
 std::string Trim(std::string s) {
     const auto is_space = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\r'; };
@@ -195,7 +145,7 @@ BridgeConfig LoadBridgeConfig() {
     std::size_t size = 0;
 
     if (const char* v = PickEnv("TDX_CZSC_PIPE", ini.pipe_name); v != nullptr) {
-        config.pipe_name = Utf8ToW(v);
+        config.pipe_name = Utf8ToWide(v);
     }
     if (const char* v = PickEnv("TDX_CZSC_STARTUP_TIMEOUT_MS", ini.startup_timeout_ms);
         v != nullptr && ParseUint(v, &u32)) {
@@ -232,7 +182,7 @@ BridgeConfig LoadBridgeConfig() {
 
     // 服务可执行文件：默认 DLL 同目录 tdx_czsc_service.exe（与部署脚本拷贝位置一致）
     if (const char* v = PickEnv("TDX_CZSC_SERVICE_EXE", ini.service_exe); v != nullptr) {
-        config.service_exe = Utf8ToW(v);
+        config.service_exe = Utf8ToWide(v);
     } else {
         config.service_exe = ModuleDirectory() + L"\\tdx_czsc_service.exe";
     }

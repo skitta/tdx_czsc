@@ -12,8 +12,6 @@ struct AnalyzeOptions {
     uint32_t min_bi_len = 6;
     /// 0 = 全量（默认）；正数 = 尾部 N 根窗口。
     uint32_t analysis_window = 0;
-    bool include_objects = false;
-    bool enable_incremental = false;
 };
 
 struct AnalyzeRequestCpp {
@@ -36,8 +34,6 @@ struct AnalyzeRequestCpp {
 struct AnalysisSnapshotCpp {
     uint64_t input_hash = 0;
     uint32_t data_len = 0;
-    bool service_cache_hit = false;
-    uint32_t latency_ms = 0;
     std::unordered_map<uint32_t, std::vector<float>> channels;
 };
 

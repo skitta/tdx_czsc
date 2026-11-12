@@ -11,6 +11,8 @@
 
 #include <Windows.h>
 
+#include "bridge_text.h"
+
 namespace tdx_czsc {
 namespace {
 
@@ -23,43 +25,12 @@ std::mutex& LogMutex() {
     return mutex;
 }
 
-std::string WideToUtf8(const std::wstring& input) {
-    if (input.empty()) {
-        return {};
-    }
-
-    const int size_needed = WideCharToMultiByte(
-        CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()), nullptr, 0, nullptr, nullptr);
-    if (size_needed <= 0) {
-        return {};
-    }
-
-    std::string result(static_cast<std::size_t>(size_needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, input.c_str(), static_cast<int>(input.size()),
-                        result.data(), size_needed, nullptr, nullptr);
-    return result;
-}
-
-std::filesystem::path ResolveModuleDirectory() {
-    HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(&ResolveModuleDirectory), &module)) {
-        return std::filesystem::current_path();
-    }
-
-    std::wstring buffer(MAX_PATH, L'\0');
-    DWORD copied = GetModuleFileNameW(module, buffer.data(), static_cast<DWORD>(buffer.size()));
-    if (copied == 0) {
-        return std::filesystem::current_path();
-    }
-    buffer.resize(copied);
-    return std::filesystem::path(buffer).parent_path();
-}
-
 std::string ResolveLogPath() {
     try {
-        const auto dir = ResolveModuleDirectory() / "logs";
+        const std::wstring module_dir = ModuleDirectory();
+        const auto dir = module_dir.empty()
+                             ? std::filesystem::current_path() / "logs"
+                             : std::filesystem::path(module_dir) / "logs";
         std::filesystem::create_directories(dir);
         return (dir / "tdx_czsc_bridge.log").string();
     } catch (...) {
@@ -105,14 +76,18 @@ void WriteLine(const char* level, const std::string& message) {
 
 }  // namespace
 
-void LogDebug(const std::string& message) {
-    // 热路径（每次公式调用都会记录）默认关闭，需要时设 TDX_CZSC_LOG_DEBUG=1。
+bool DebugLoggingEnabled() {
     static const bool enabled = [] {
         char value[8]{};
         const DWORD size = GetEnvironmentVariableA("TDX_CZSC_LOG_DEBUG", value, sizeof(value));
         return size == 1 && value[0] == '1';
     }();
-    if (!enabled) {
+    return enabled;
+}
+
+void LogDebug(const std::string& message) {
+    // 热路径（每次公式调用都会记录）默认关闭，需要时设 TDX_CZSC_LOG_DEBUG=1。
+    if (!DebugLoggingEnabled()) {
         return;
     }
     WriteLine("DEBUG", message);

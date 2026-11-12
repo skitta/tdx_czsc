@@ -30,8 +30,8 @@ private:
     HANDLE TryConnect(std::string* out_error) const;
     bool IoWithTimeout(HANDLE pipe, bool is_write, void* buffer, DWORD bytes_to_transfer,
                        DWORD* out_transferred, std::string* out_error) const;
-    bool WriteFrame(void* pipe_handle, const std::vector<std::uint8_t>& payload, std::string* out_error);
-    bool ReadFrame(void* pipe_handle, std::vector<std::uint8_t>* out_payload, std::string* out_error);
+    bool WriteFrame(HANDLE pipe, const std::vector<std::uint8_t>& payload, std::string* out_error);
+    bool ReadFrame(HANDLE pipe, std::vector<std::uint8_t>* out_payload, std::string* out_error);
 
     BridgeConfig config_;
 };

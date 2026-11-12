@@ -128,7 +128,7 @@ TDXDLL1(func_id, HIGH, LOW, CLOSE)
 |---|---|
 | 操作系统 | **Windows x64**（DLL 集成）；Rust 服务部分可跨平台开发 |
 | Rust | stable（`rust_service/Cargo.toml`，edition 2024） |
-| `protoc` | 需在 PATH（或设 `PROTOC` 环境变量，`build.rs` 生成协议） |
+| `protoc` | 需在 PATH；也可在 `.build/<os>.env` 或环境变量 `PROTOC` 中指定路径（见下方「本机编译配置」） |
 | CMake + MSVC | x64 工具链（构建 Bridge DLL） |
 | vcpkg | 提供 protobuf C++ 运行时；依赖与版本声明在 `bridge_dll/vcpkg.json` |
 | 通达信 | x64 版本（验证显示） |
@@ -141,6 +141,21 @@ cargo run            # 启动 Named Pipe 服务（默认管道 \\.\pipe\tdx_czsc
 ```
 
 macOS/Linux 下同样可 `cargo check` / `cargo test`（服务端逻辑），仅 DLL 联调必须 Windows。
+
+**本机编译配置（跨平台）**
+
+`build.rs` 不再硬编码任何工具路径，各系统按需在仓库根目录创建
+`.build/windows.env`、`.build/macos.env` 或 `.build/linux.env`（该目录已加入
+`.gitignore`，不入库）：
+
+```text
+# KEY=VALUE，一行一个，不要加引号
+PROTOC=E:/DELL/Documents/Codes/vcpkg/installed/x64-windows/tools/protobuf/protoc.exe
+```
+
+优先级：真实环境变量 > `.build/<os>.env`。文件不存在时直接跳过，此时要求
+`protoc` 在 PATH 中；`.env` 里的键同样会注入构建脚本，修改后会自动触发重新构建。
+系统临时目录不可写时（如编辑器沙箱），构建脚本会自动改用 `OUT_DIR` 作为临时目录。
 
 ### 2. 构建 Bridge DLL 并跑冒烟测试
 
@@ -155,8 +170,18 @@ build\Release\tdx_czsc_ipc_smoke_test.exe   # 先跑控制台 IPC 测试
 ### 3. 部署到通达信
 
 ```powershell
-.\deploy_to_tdx.bat            # 默认部署到 D:\new_tdx64；可传参：.\deploy_to_tdx.bat D:\new_tdx64
+.\deploy_to_tdx.bat                  # 目标目录取自 .build/windows.env 的 TDX_DIR
+.\deploy_to_tdx.bat D:\new_tdx64     # 命令行参数优先
+$env:TDX_DIR = "D:\new_tdx64"        # 环境变量优先于 .env 文件
 ```
+
+脚本不内置任何机器相关路径：通达信目录按「参数 > 环境变量 `TDX_DIR` > `.build/windows.env`」
+解析，缺失时报错退出；构建输出目录可用 `CARGO_TARGET_DIR`（cargo 原生）与
+`TDX_CZSC_DLL_BUILD_DIR`（cmake）覆盖，脚本从这两个变量取拷贝源。
+
+构建期间的临时文件同样可控：`build.rs` 默认用系统临时目录；系统临时目录不可写时
+自动改到 `OUT_DIR`，并在构建输出里打印
+`warning: 系统临时目录不可写，构建临时文件改用 <路径>`，该目录随 `cargo clean` 清理。
 
 脚本自动完成：① `cargo build --release`；② cmake 构建 DLL；③ 拷贝
 `tdx_czsc_bridge.dll`（含 `libprotobuf.dll`、`abseil_dll.dll` 运行时）与
@@ -263,6 +288,7 @@ tdx_czsc/
 ├── tdx_formula_examples/       # 通达信公式模板（main_chart_full / atr_tp_sl / atr_sl_day / buy_sell_expert / buy_sell_mark / chan_select）
 ├── tests/data/                 # 回归测试真实行情 CSV
 ├── docs/                       # 技术方案 + 通达信 DLL 编程规范
+├── .build/                     # 本机编译配置 windows/macos/linux.env（本地生成，已 gitignore）
 ├── deploy_to_tdx.bat           # 一键部署：构建服务与 DLL 并拷贝到通达信
 ├── CONTRIBUTING.md
 └── LICENSE                     # MIT

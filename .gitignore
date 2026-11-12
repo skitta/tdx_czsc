@@ -9,6 +9,10 @@
 
 # ---- Rust 构建产物（cargo build 可随时重建） ----
 /rust_service/target/
+.build-tmp/
+
+# ---- 各系统本机编译配置（PROTOC 等，不入库） ----
+/.build/
 
 # ---- C++/CMake 构建产物（cmake 可随时重建） ----
 /bridge_dll/build/
@@ -38,3 +42,5 @@ desktop.ini
 # ---- Agents ----
 .agents/
 .gortex/
+.zcode/
+.hermes/

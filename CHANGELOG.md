@@ -3,6 +3,27 @@
 本项目采用"节点式手写"轻量维护方式；服务版本由 `rust_service/Cargo.toml`
 （`CARGO_PKG_VERSION`）发布，通道与协议以 `proto/analysis.proto` 为准。
 
+## [未发布]
+
+**段中枢**（以已确认段为构件，复用笔中枢规则）。
+
+### 变更
+
+- **中枢算法抽出构件视图**：新增 `PivotUnit` 与 `build_selection`，笔中枢
+  `PivotAnalyzer` 与段中枢 `SegmentPivotAnalyzer` 共用原生贪心归属、
+  前端/后端修剪与相邻间隔规则；`PivotAnalyzer::build` 签名与输出（`Vec<ZS>`）
+  不变，三买三卖严格化与既有回归测试不受影响；
+- **新增段中枢通道**：305 `seg_zs_upper`、306 `seg_zs_lower`、
+  307 `seg_zs_boundary`（`ChannelKind`、`CHANNEL_SPECS`、DLL func_id 清单同步）；
+- **协议新增对象**：`AnalysisSnapshot.segment_pivots`（`PivotZone`），
+  `include_objects=true` 时返回，未确认段不参与；
+- **主图公式**：段中枢洋红实线矩形 + `段中枢开关`（默认开），笔中枢改为
+  蓝色虚线以便区分；
+- **测试**：新增 `tests/segment_pivot_regression.rs`（30 分钟 3 个段中枢锚点、
+  不重叠、仅用确认段、日线结构合法性）；
+- 部署顺序：旧服务端 + 新 DLL 会因未知 func_id 导致整个快照失败，
+  必须**先升级服务端、再更新 DLL 与公式**。
+
 ## [0.9.0] - 2026-08
 
 **预留清理 + 配置加载**（按用户原则：非用户提出/同意的功能不再预留）。

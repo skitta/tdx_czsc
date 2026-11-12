@@ -17,6 +17,7 @@
 # ---- C++/CMake 构建产物（cmake 可随时重建） ----
 /bridge_dll/build/
 /bridge_dll/vcpkg_installed/
+/bridge_dll/.cache/
 
 # ---- 运行时日志 ----
 /bridge_dll/logs/

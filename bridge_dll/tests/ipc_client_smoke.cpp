@@ -202,6 +202,10 @@ int main() {
     PrintChannelPreview(snapshot.channels, 303);
     // 304 中枢边界: 左界=1 右界=2, 全量显示便于确认链路
     PrintChannelPreview(snapshot.channels, 304, 64);
+    // 305~307 段中枢（以已确认段为构件）：上下沿 + 左右界
+    PrintChannelPreview(snapshot.channels, 305);
+    PrintChannelPreview(snapshot.channels, 306);
+    PrintChannelPreview(snapshot.channels, 307, 64);
     // 买卖点信号可能出现在窗口后半段，401~406 显示全量值便于确认。
     PrintChannelPreview(snapshot.channels, 401, 64);
     PrintChannelPreview(snapshot.channels, 402, 64);

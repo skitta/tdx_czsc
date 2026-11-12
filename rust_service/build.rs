@@ -5,18 +5,18 @@ fn main() {
 
     // 受限环境（如 Zed 的沙箱）下系统临时目录不可写，prost-build 会创建临时目录失败；
     // 探测失败时改用 cargo 已创建好的 OUT_DIR 作为临时目录。
-    if !temp_dir_writable() {
-        if let Some(out_dir) = std::env::var_os("OUT_DIR") {
-            println!(
-                "cargo:warning=系统临时目录不可写，构建临时文件改用 {}（随 cargo clean 清理）",
-                std::path::Path::new(&out_dir).display()
-            );
-            #[allow(unsafe_code)]
-            unsafe {
-                std::env::set_var("TMP", &out_dir);
-                std::env::set_var("TEMP", &out_dir);
-                std::env::set_var("TMPDIR", &out_dir);
-            }
+    if !temp_dir_writable()
+        && let Some(out_dir) = std::env::var_os("OUT_DIR")
+    {
+        println!(
+            "cargo:warning=系统临时目录不可写，构建临时文件改用 {}（随 cargo clean 清理）",
+            std::path::Path::new(&out_dir).display()
+        );
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("TMP", &out_dir);
+            std::env::set_var("TEMP", &out_dir);
+            std::env::set_var("TMPDIR", &out_dir);
         }
     }
 

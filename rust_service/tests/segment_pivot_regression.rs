@@ -3,7 +3,8 @@
 //! 段中枢以**已确认段**为构件（3 段重叠成中枢），复用笔中枢的趋势判定与
 //! 进入/离开构件修剪规则：
 //! - 相邻段中枢不共享端点 K 线（至少间隔一段）；
-//! - 上下沿 `[zd, zg]` 由中枢前 3 段的重叠决定，中轴为区间中点；
+//! - 上下沿 `[zd, zg]` 由中枢前 3 段的重叠决定（九段升级后取三三得九交集，
+//!   并与子中枢区间取包络——只加宽不收窄），中轴为区间中点；
 //! - 305/306 在中枢区间内恒为上下沿、区间外为 0；307 首 K 线=1、尾 K 线=2。
 
 use tdx_czsc_service::analyzer::{AnalysisParams, SnapshotAnalyzer};
@@ -16,7 +17,7 @@ use common::{analyze_request_ex, config_for, load_series};
 fn build(csv: &str, freq: &str, min_bi_len: u32) -> AnalysisSnapshot {
     let (_, high, low, close) = load_series(csv);
     let request = analyze_request_ex(
-        vec![305, 306, 307],
+        vec![305, 306, 307, 309],
         freq,
         high,
         low,
@@ -42,20 +43,50 @@ fn channel(snapshot: &AnalysisSnapshot, func_id: u32) -> &Vec<f32> {
         .values
 }
 
-/// 30 分钟数据（110 笔 / 约 19 段）回归锚点：应识别出 3 个段中枢，
-/// 且每个中枢在 305/306/307 上都有完整的上沿、下沿与左右界。
+/// 30 分钟数据（110 笔 / 约 19 段）回归锚点：九段升级把相邻重叠的两个
+/// 段中枢替换为一个高一级中枢，最终识别出 2 个段中枢，且每个中枢在
+/// 305/306/307 上都有完整的上沿、下沿与左右界。
 #[test]
 fn intraday_segment_pivots_are_drawn() {
     let snapshot = build("../tests/data/002340_30m.csv", "F30", 3);
     let upper = channel(&snapshot, 305);
     let lower = channel(&snapshot, 306);
     let boundary = channel(&snapshot, 307);
+    let level = channel(&snapshot, 309);
 
     assert_eq!(
         snapshot.segment_pivots.len(),
-        3,
-        "002340 30m 应识别出 3 个段中枢"
+        2,
+        "002340 30m 应识别出 2 个段中枢（九段升级后）: {:?}",
+        snapshot.segment_pivots
     );
+    assert_eq!(
+        (
+            snapshot.segment_pivots[0].start_index,
+            snapshot.segment_pivots[0].end_index,
+        ),
+        (53, 99),
+        "首个段中枢区间应保持不变"
+    );
+    assert_eq!(
+        (
+            snapshot.segment_pivots[1].start_index,
+            snapshot.segment_pivots[1].end_index,
+        ),
+        (160, 369),
+        "升级后的段中枢应覆盖被替换的子中枢"
+    );
+
+    // 级别通道（309）：首个段中枢为本级(1)，第二个为九段升级(2)
+    let expected_levels = [(53usize, 99usize, 1.0f32), (160, 369, 2.0)];
+    for (start, end, expected) in expected_levels {
+        for (i, value) in level.iter().enumerate().take(end + 1).skip(start) {
+            assert_eq!(
+                *value, expected,
+                "309 级别在 [{start},{end}] 内应为 {expected}: bar {i}"
+            );
+        }
+    }
 
     for pivot in &snapshot.segment_pivots {
         let s = pivot.start_index as usize;

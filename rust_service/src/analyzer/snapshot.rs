@@ -66,7 +66,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
         let finished_bis = self.czsc.get_finished_bis();
 
         let t0 = std::time::Instant::now();
-        let pivots = PivotAnalyzer::new(&finished_bis).build();
+        let (pivots, pivot_levels) = PivotAnalyzer::new(&finished_bis).build_with_levels();
         let segs = SegmentAnalyzer::new(&finished_bis).build();
         let segment_pivots = SegmentPivotAnalyzer::new(&finished_bis, &segs).build();
         PivotAnalyzer::strictize_third_points(&mut self.buy_sell_points, &pivots);
@@ -79,6 +79,7 @@ impl<'s, 'a> SnapshotAssembler<'s, 'a> {
             .fractals(&fractals)
             .bis(&finished_bis)
             .pivots(&pivots)
+            .pivot_levels(&pivot_levels)
             .segment_pivots(&segment_pivots)
             .segs(&segs)
             .buy_sell_points(&self.buy_sell_points)

@@ -95,6 +95,10 @@ enum ChannelKind {
   CHANNEL_SEG_ZS_LOWER = 306;
   CHANNEL_SEG_ZS_BOUNDARY = 307;
 
+  // 中枢级别通道：区间内输出 1（本级）或 2（九段升级后的高一级中枢）
+  CHANNEL_ZS_LEVEL = 308;
+  CHANNEL_SEG_ZS_LEVEL = 309;
+
   // 买卖点通道
   CHANNEL_BUY1 = 401;
   CHANNEL_SELL1 = 402;

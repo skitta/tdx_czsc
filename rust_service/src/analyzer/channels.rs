@@ -10,10 +10,11 @@ use czsc_core::objects::direction::Direction as CzscDirection;
 use czsc_core::objects::fx::FX;
 use czsc_core::objects::mark::Mark;
 use czsc_core::objects::zs::ZS;
+use std::iter::repeat;
 
 use super::error::AnalysisError;
 use super::objects::{FxAnchor, ZsAnchor};
-use super::pivots::SegmentPivot;
+use super::pivots::{Band, PivotLevel, SegmentPivot};
 use super::segs::Segment;
 use super::signals::BuySellPoint;
 use crate::proto::analysis::{ChannelKind, ChannelSeries};
@@ -85,6 +86,10 @@ enum Fill {
     SegmentZs(ZsField),
     /// 段中枢左右界标记 1/2/3（307）。
     SegmentZsBoundary,
+    /// 中枢级别 1/2（308）：与本级中枢区间对齐。
+    ZsLevel,
+    /// 段中枢级别 1/2（309）：与本级段中枢区间对齐。
+    SegmentZsLevel,
     /// 买卖点锚点价格，按 func_id 过滤（401~406）。
     Signal,
     /// 诊断通道，由 handlers 侧补丁填充（901~903）。
@@ -176,6 +181,18 @@ const CHANNEL_SPECS: &[ChannelSpec] = &[
         fill: Fill::SegmentZsBoundary,
     },
     ChannelSpec {
+        func_id: 308,
+        kind: ChannelKind::ChannelZsLevel,
+        name: "zs_level",
+        fill: Fill::ZsLevel,
+    },
+    ChannelSpec {
+        func_id: 309,
+        kind: ChannelKind::ChannelSegZsLevel,
+        name: "seg_zs_level",
+        fill: Fill::SegmentZsLevel,
+    },
+    ChannelSpec {
         func_id: 401,
         kind: ChannelKind::ChannelBuy1,
         name: "buy1",
@@ -240,6 +257,7 @@ pub struct ChannelBuilder<'a> {
     fractals: &'a [FX],
     finished_bis: &'a [BI],
     pivots: &'a [ZS],
+    pivot_levels: &'a [PivotLevel],
     segment_pivots: &'a [SegmentPivot],
     segs: &'a [Segment],
     buy_sell_points: &'a [BuySellPoint],
@@ -252,6 +270,7 @@ impl<'a> ChannelBuilder<'a> {
             fractals: &[],
             finished_bis: &[],
             pivots: &[],
+            pivot_levels: &[],
             segment_pivots: &[],
             segs: &[],
             buy_sell_points: &[],
@@ -270,6 +289,12 @@ impl<'a> ChannelBuilder<'a> {
 
     pub(crate) fn pivots(mut self, pivots: &'a [ZS]) -> Self {
         self.pivots = pivots;
+        self
+    }
+
+    /// 笔中枢级别，与 [`Self::pivots`] 按顺序对齐（缺失按本级处理）。
+    pub(crate) fn pivot_levels(mut self, levels: &'a [PivotLevel]) -> Self {
+        self.pivot_levels = levels;
         self
     }
 
@@ -302,6 +327,8 @@ impl<'a> ChannelBuilder<'a> {
             Fill::ZsBoundary => self.fill_zs_boundary_channel(&mut values)?,
             Fill::SegmentZs(field) => self.fill_segment_zs_channel(&mut values, *field)?,
             Fill::SegmentZsBoundary => self.fill_segment_zs_boundary_channel(&mut values)?,
+            Fill::ZsLevel => self.fill_zs_level_channel(&mut values)?,
+            Fill::SegmentZsLevel => self.fill_segment_zs_level_channel(&mut values)?,
             Fill::Signal => self.fill_signal_channel(&mut values, func_id.id)?,
             Fill::Debug => {}
         }
@@ -424,15 +451,15 @@ impl<'a> ChannelBuilder<'a> {
         &self,
         values: &mut [f32],
         field: ZsField,
-        pivots: impl Iterator<Item = ((usize, usize), f64, f64, f64)>,
+        pivots: impl Iterator<Item = ((usize, usize), Band)>,
         channel: &str,
     ) -> Result<(), AnalysisError> {
         let mut values = ChannelBuf::new(values);
-        for ((start, end), zg, zd, zz) in pivots {
+        for ((start, end), band) in pivots {
             let pivot_value = match field {
-                ZsField::Upper => zg,
-                ZsField::Lower => zd,
-                ZsField::Middle => zz,
+                ZsField::Upper => band.zg,
+                ZsField::Lower => band.zd,
+                ZsField::Middle => band.mid(),
             } as f32;
             values.fill_range(start, end, pivot_value, channel)?;
         }
@@ -443,9 +470,17 @@ impl<'a> ChannelBuilder<'a> {
         self.fill_pivot_field(
             values,
             field,
-            self.pivots
-                .iter()
-                .filter_map(|zs| zs.span().map(|span| (span, zs.zg, zs.zd, zs.zz))),
+            self.pivots.iter().filter_map(|zs| {
+                zs.span().map(|span| {
+                    (
+                        span,
+                        Band {
+                            zd: zs.zd,
+                            zg: zs.zg,
+                        },
+                    )
+                })
+            }),
             "zs",
         )
     }
@@ -466,13 +501,42 @@ impl<'a> ChannelBuilder<'a> {
             field,
             self.segment_pivots
                 .iter()
-                .filter_map(|p| p.span().map(|span| (span, p.zg, p.zd, p.zz))),
+                .filter_map(|p| p.span().map(|span| (span, p.band()))),
             "seg zs",
         )
     }
 
     fn fill_segment_zs_boundary_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
         self.fill_pivot_boundary(values, self.segment_pivots.iter().filter_map(|p| p.span()))
+    }
+
+    /// 笔中枢级别（308）：区间内填 1（本级）或 2（九段升级）；级别表缺失时按本级。
+    fn fill_zs_level_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        let levels = self
+            .pivot_levels
+            .iter()
+            .copied()
+            .chain(repeat(PivotLevel::Base));
+        for (zs, level) in self.pivots.iter().zip(levels) {
+            let Some((start, end)) = zs.span() else {
+                continue;
+            };
+            values.fill_range(start, end, level.code(), "zs level")?;
+        }
+        Ok(())
+    }
+
+    /// 段中枢级别（309）：区间内填 1（本级）或 2（九段升级）。
+    fn fill_segment_zs_level_channel(&self, values: &mut [f32]) -> Result<(), AnalysisError> {
+        let mut values = ChannelBuf::new(values);
+        for pivot in self.segment_pivots {
+            let Some((start, end)) = pivot.span() else {
+                continue;
+            };
+            values.fill_range(start, end, pivot.level().code(), "seg zs level")?;
+        }
+        Ok(())
     }
 
     /// 中枢左右界标记共用实现（304/307）。

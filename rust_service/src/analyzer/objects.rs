@@ -163,13 +163,14 @@ impl TryFrom<&SegmentPivot> for PivotZone {
 
     fn try_from(pivot: &SegmentPivot) -> Result<Self, Self::Error> {
         let (start_index, end_index) = pivot.span().ok_or(AlignError)?;
+        let band = pivot.band();
 
         Ok(PivotZone {
             start_index: start_index as u32,
             end_index: end_index as u32,
-            upper: pivot.zg,
-            lower: pivot.zd,
-            middle: pivot.zz,
+            upper: band.zg,
+            lower: band.zd,
+            middle: band.mid(),
         })
     }
 }

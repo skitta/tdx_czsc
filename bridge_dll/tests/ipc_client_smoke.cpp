@@ -206,6 +206,9 @@ int main() {
     PrintChannelPreview(snapshot.channels, 305);
     PrintChannelPreview(snapshot.channels, 306);
     PrintChannelPreview(snapshot.channels, 307, 64);
+    // 308/309 中枢级别：区间内 1=本级、2=九段升级，全量显示便于确认
+    PrintChannelPreview(snapshot.channels, 308, 64);
+    PrintChannelPreview(snapshot.channels, 309, 64);
     // 买卖点信号可能出现在窗口后半段，401~406 显示全量值便于确认。
     PrintChannelPreview(snapshot.channels, 401, 64);
     PrintChannelPreview(snapshot.channels, 402, 64);

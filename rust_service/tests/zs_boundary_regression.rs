@@ -97,6 +97,9 @@ fn adjacent_pivots_never_share_endpoints_on_real_data() {
 /// - **后端**：中枢最后一笔与行情趋势相反（离开笔已剔除，中枢为奇数笔
 ///   结构）。
 ///
+/// 九段升级后的中枢覆盖整条链（含进入/离开构件），两端不再遵循 level-1 的
+/// 方向规则，因此只对 level-1 中枢（构件数 < 9）断言边沿方向。
+///
 /// 与 `build_snapshot` 的构建路径一致（同一份笔输入、同一分析窗口）。
 #[test]
 fn pivot_edges_follow_trend_on_real_data() {
@@ -138,6 +141,7 @@ fn pivot_edges_follow_trend_on_real_data() {
             bis.len()
         );
         let mut prev_trend = Direction::Up;
+        let mut upgraded = 0;
         for (k, zs) in pivots.iter().enumerate() {
             // 行情趋势 = 中枢高低位置
             let trend = if k == 0 {
@@ -154,6 +158,12 @@ fn pivot_edges_follow_trend_on_real_data() {
                 prev_trend
             };
             prev_trend = trend;
+            if zs.bis.len() >= 9 {
+                // 升级中枢：区间由三三得九交集给出，与两端构件方向无关
+                upgraded += 1;
+                assert!(zs.zg > zs.zd, "升级中枢区间应有效: {csv_path}");
+                continue;
+            }
             let expected_sdir = match trend {
                 Direction::Up => Direction::Down,
                 Direction::Down => Direction::Up,
@@ -176,37 +186,42 @@ fn pivot_edges_follow_trend_on_real_data() {
             // 相邻间隔：前中枢后端与后一中枢前端至少间隔一笔（由 snapshot
             // 通道映射校验，见 adjacent_pivots_never_share_endpoints_on_real_data）
         }
-        println!("{csv_path}: bis={} pivots={}", bis.len(), pivots.len());
+        println!(
+            "{csv_path}: bis={} pivots={} upgraded={}",
+            bis.len(),
+            pivots.len(),
+            upgraded
+        );
     }
 }
 
-/// 前端+后端优化后的中枢画法在报告案例（002340 日线）上的回归锚点：
-/// 断言完整的 7 个中枢配置（区间、绘制起止日期、左右界标记）。
+/// 前端+后端优化 + 九段升级后的中枢画法在报告案例（002340 日线）上的回归
+/// 锚点：断言完整的 4 个中枢配置（区间、绘制起止日期、左右界标记）。
 ///
 /// 规则演变（同一数据、同一窗口）：
 /// - 纯原生 get_zs_seq：9 个中枢，相邻共享端点（连接笔并入后一中枢）；
 /// - 仅前端优化：8 个（原生 [6.32..6.67] 仅 2 笔剔除）；
-/// - 前端+后端优化（本轮）：7 个——每个中枢末笔与趋势相反（离开笔剔除，
-///   奇数笔结构），相邻中枢至少间隔一笔。报告中的 [7.22..7.63]（3 笔，
-///   两端均与邻居共享端点）无法满足间隔规则，整组剔除；其两侧中枢
-///   [7.74..8.68] 与 [8.50..9.41] 保留并留出间隔。
+/// - 前端+后端优化：7 个——每个中枢末笔与趋势相反（离开笔剔除，奇数笔
+///   结构），相邻中枢至少间隔一笔。报告中的 [7.22..7.63]（3 笔，两端均与
+///   邻居共享端点）无法满足间隔规则，整组剔除；
+/// - 九段升级：4 个——[5.52..6.84]/[6.72..7.09]/[6.05..6.24] 三中枢区间
+///   两两重叠、构件跨度达到九段，合并为三三得九交集与子中枢包络的并
+///   [5.52..7.09]；[7.74..8.68] 与 [8.50..9.41] 同样合并为 [7.43..9.41]；
+///   其余两个保持 level-1。高一级中枢在时间与价格上都包住子中枢。
 #[test]
 fn native_zs_configuration_on_reported_data() {
     let (dates, snapshot, boundary) = build_channels();
 
     let expected: Vec<(f64, f64, &str, &str)> = vec![
-        (5.52, 6.84, "2024-03-28", "2024-10-08"),
-        (6.72, 7.09, "2024-10-23", "2024-11-19"),
-        (6.05, 6.24, "2025-01-06", "2025-07-24"),
+        (5.52, 7.09, "2024-03-28", "2025-07-24"),
         (7.15, 7.54, "2025-08-27", "2025-09-23"),
-        (7.74, 8.68, "2025-10-14", "2025-11-24"),
-        (8.50, 9.41, "2026-01-07", "2026-03-24"),
+        (7.43, 9.41, "2025-10-14", "2026-03-24"),
         (6.67, 7.08, "2026-06-08", "2026-08-10"),
     ];
     assert_eq!(
         snapshot.pivots.len(),
         expected.len(),
-        "前端+后端优化后应识别出 {} 个中枢，实际 {}",
+        "九段升级后应识别出 {} 个中枢，实际 {}",
         expected.len(),
         snapshot.pivots.len()
     );

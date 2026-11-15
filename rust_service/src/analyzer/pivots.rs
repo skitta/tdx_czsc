@@ -23,16 +23,115 @@
 //! **相邻间隔**：前一个中枢后端与后一中枢前端不得共享端点，必须至少间隔
 //! 一构件——后端剔除后，离开/连接构件落在两个中枢矩形之间，不属于任一中枢。
 //!
+//! **延伸**：中枢存续期间，只要后续构件与 `[zd, zg]` 仍有交集就继续并入；
+//! 构件完全离开区间时延伸结束——与三买/三卖（回抽不再回到中枢）同一口径。
+//!
+//! **扩展与升级（九段 + 三三得九）**：中枢构件数达到九段时并入高一级中枢；
+//! 相邻且区间重叠的中枢先串成一条链，链首到链尾的构件跨度达到九段时整条链
+//! 一起升级（扩展）。升级把每 3 个构件合成一个次级别走势（区间取 3 个构件的
+//! 包络，不足 3 个的尾巴并入末段），高一级区间取前 3 个次级别走势的交集，
+//! 再与全部子中枢的区间取包络——**高一级中枢在时间与价格上都必须包住子中枢**，
+//! 左右和上下都不会缩窄；交集为空则不升级，保持原级别。升级后的中枢
+//! **替换**其子中枢——只画一个大矩形，绘制区间覆盖整条链。只做一级升级
+//! （level ≤ 2）。
+//!
 //! 剔除后不足 3 个构件、前 3 个构件无重叠、或无法同时满足上述规则的候选中枢整组
 //! 剔除（不绘制）。
 
 use czsc_core::objects::bi::BI;
 use czsc_core::objects::direction::Direction as CzscDirection;
 use czsc_core::objects::zs::ZS;
+use std::collections::HashSet;
 
 use super::objects::BiAnchor;
 use super::segs::Segment;
 use super::signals::BuySellPoint;
+
+/// 中枢价格区间 `[zd, zg]`：`zd` 为下沿、`zg` 为上沿。
+///
+/// 区间交集、包络、相交与中轴都挂在这个类型上：`intersect` 与 `hull` 互为
+/// 对偶（三三得九取前 3 个次级别走势的 `intersect`，包络取全部子中枢的
+/// `hull`），避免用裸 `(f64, f64)` 在多个函数间传递同一语义。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Band {
+    pub(crate) zd: f64,
+    pub(crate) zg: f64,
+}
+
+impl Band {
+    /// 交集单位元（全集）：`band.intersect(Band::UNIVERSE) == band`。
+    const UNIVERSE: Self = Self {
+        zd: f64::NEG_INFINITY,
+        zg: f64::INFINITY,
+    };
+
+    /// 包络单位元（空集）：`band.hull(Band::EMPTY) == band`。
+    const EMPTY: Self = Self {
+        zd: f64::INFINITY,
+        zg: f64::NEG_INFINITY,
+    };
+
+    /// 构件自身的价格区间（`zd` = low、`zg` = high）。
+    fn of(unit: &PivotUnit) -> Self {
+        Self {
+            zd: unit.low,
+            zg: unit.high,
+        }
+    }
+
+    /// 区间是否非空（`zg >= zd`）。
+    fn is_valid(self) -> bool {
+        self.zg >= self.zd
+    }
+
+    /// 交集：`zd` 取高者、`zg` 取低者；可能为空，用 [`Self::is_valid`] 判断。
+    fn intersect(self, other: Self) -> Self {
+        Self {
+            zd: self.zd.max(other.zd),
+            zg: self.zg.min(other.zg),
+        }
+    }
+
+    /// 包络：`zd` 取低者、`zg` 取高者（只加宽，不收窄）。
+    fn hull(self, other: Self) -> Self {
+        Self {
+            zd: self.zd.min(other.zd),
+            zg: self.zg.max(other.zg),
+        }
+    }
+
+    /// 闭区间是否相交。
+    fn overlaps(self, other: Self) -> bool {
+        self.zg >= other.zd && other.zg >= self.zd
+    }
+
+    /// 中轴：区间中点。
+    pub(crate) fn mid(self) -> f64 {
+        self.zd + (self.zg - self.zd) * 0.5
+    }
+}
+
+/// 中枢级别：本级（3~8 个构件）或九段升级后的高一级中枢。
+///
+/// 级别只在本级/高一级之间二选一（不做多级递归），`code` 是 308/309
+/// 级别通道的协议取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PivotLevel {
+    /// 本级中枢。
+    Base,
+    /// 九段升级后的高一级中枢。
+    Upgraded,
+}
+
+impl PivotLevel {
+    /// 级别通道取值：本级 = 1，升级 = 2。
+    pub(crate) fn code(self) -> f32 {
+        match self {
+            Self::Base => 1.0,
+            Self::Upgraded => 2.0,
+        }
+    }
+}
 
 /// 中枢构件（笔或已确认段）的算法视图：只保留中枢判定实际读取的字段。
 ///
@@ -50,6 +149,18 @@ pub(crate) struct PivotUnit {
 }
 
 impl PivotUnit {
+    /// 中枢最少构件数：三段重叠才构成中枢。
+    const MIN_PIVOT_UNITS: usize = 3;
+
+    /// 升级门槛：中枢（或中枢链）构件跨度达到九段才并入高一级中枢。
+    const MIN_UPGRADE_UNITS: usize = 9;
+
+    /// 每个次级别走势由 3 个构件合成。
+    const SUBTREND_UNITS: usize = 3;
+
+    /// 高一级中枢由前 3 个次级别走势重叠而成（三三得九）。
+    const UPGRADE_TRENDS: usize = 3;
+
     /// 以一笔为构件。
     fn from_bi(bi: &BI) -> Self {
         Self {
@@ -63,17 +174,102 @@ impl PivotUnit {
     }
 
     /// 一组构件前 3 个的重叠区间：`zd` 取低点最大值、`zg` 取高点最小值。
-    fn band(units: &[PivotUnit], indices: &[usize]) -> (f64, f64) {
-        let first: &[usize] = &indices[..indices.len().min(3)];
-        let zd = first
+    fn band(units: &[PivotUnit], indices: &[usize]) -> Band {
+        indices
             .iter()
-            .map(|&i| units[i].low)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let zg = first
-            .iter()
-            .map(|&i| units[i].high)
-            .fold(f64::INFINITY, f64::min);
-        (zd, zg)
+            .take(Self::SUBTREND_UNITS)
+            .map(|&index| Band::of(&units[index]))
+            .fold(Band::UNIVERSE, Band::intersect)
+    }
+
+    /// `first..=last` 构件的包络区间（最低 low、最高 high）。
+    fn envelope(units: &[PivotUnit], first: usize, last: usize) -> Band {
+        units
+            .get(first..=last)
+            .into_iter()
+            .flatten()
+            .map(Band::of)
+            .fold(Band::EMPTY, Band::hull)
+    }
+
+    /// 三三得九：每 3 个构件合成一个次级别走势（取包络），不足 3 个的尾巴
+    /// 并入末段；构件不足九段返回 `None`。
+    fn subtrends(units: &[PivotUnit], first: usize, last: usize) -> Option<Vec<Band>> {
+        let count = last.checked_sub(first)? + 1;
+        if count < Self::MIN_UPGRADE_UNITS {
+            return None;
+        }
+        // 段数按 3 取整；余下的尾巴由末段吸收，不另起一段
+        let trends = count / Self::SUBTREND_UNITS;
+        Some(
+            (0..trends)
+                .map(|index| {
+                    let start = first + index * Self::SUBTREND_UNITS;
+                    // 末段一直取到 `last`，把不足 3 个的尾巴并入末段
+                    let end = if index + 1 == trends {
+                        last
+                    } else {
+                        start + Self::SUBTREND_UNITS - 1
+                    };
+                    Self::envelope(units, start, end)
+                })
+                .collect(),
+        )
+    }
+
+    /// 高一级中枢区间：前 3 个次级别走势的交集；构件不足九段或交集为空返回
+    /// `None`（交由调用方保持原级别）。
+    fn upgrade_band(units: &[PivotUnit], first: usize, last: usize) -> Option<Band> {
+        let band = Self::subtrends(units, first, last)?
+            .into_iter()
+            .take(Self::UPGRADE_TRENDS)
+            .reduce(Band::intersect)?;
+        band.is_valid().then_some(band)
+    }
+
+    /// 构件是否仍与中枢区间有交（未完全离开）：向上构件的高点不破下沿、
+    /// 向下构件的低点不破上沿。
+    fn stays_in(band: Band, unit: &PivotUnit) -> bool {
+        match unit.direction {
+            CzscDirection::Up => unit.high >= band.zd,
+            CzscDirection::Down => unit.low <= band.zg,
+        }
+    }
+}
+
+/// 一个待绘制中枢：构件下标 + 可选的高一级区间。
+///
+/// `upgrade == None` 表示维持 level-1，区间取前 3 个构件的重叠；
+/// `upgrade == Some(band)` 表示已按九段规则升级，区间取三三得九的前 3 个
+/// 次级别走势交集与全部子中枢区间的包络，绘制时覆盖整条链（替换被合并的
+/// 子中枢）。
+#[derive(Debug)]
+pub(crate) struct PivotSelection {
+    indices: Vec<usize>,
+    upgrade: Option<Band>,
+}
+
+impl PivotSelection {
+    /// 中枢最终区间：升级后取高一级区间，否则取前 3 个构件的重叠。
+    #[must_use]
+    pub(crate) fn band(&self, units: &[PivotUnit]) -> Band {
+        self.upgrade
+            .unwrap_or_else(|| PivotUnit::band(units, &self.indices))
+    }
+
+    /// 中枢级别：本级或九段升级后的高一级中枢。
+    #[must_use]
+    pub(crate) fn level(&self) -> PivotLevel {
+        if self.upgrade.is_some() {
+            PivotLevel::Upgraded
+        } else {
+            PivotLevel::Base
+        }
+    }
+
+    /// 中枢覆盖的构件下标（首尾即绘制区间端点）。
+    pub(crate) fn indices(&self) -> &[usize] {
+        &self.indices
     }
 }
 
@@ -88,47 +284,62 @@ impl<'a> PivotAnalyzer<'a> {
     }
 
     pub fn build(&self) -> Vec<ZS> {
+        self.build_with_levels().0
+    }
+
+    /// 构造中枢及级别（与 [`Self::build`] 同源），级别与返回的中枢按顺序对齐。
+    ///
+    /// 级别为本级或九段升级后的高一级中枢，供 308/309 级别通道使用。
+    pub(crate) fn build_with_levels(&self) -> (Vec<ZS>, Vec<PivotLevel>) {
         let units: Vec<PivotUnit> = self.bis.iter().map(PivotUnit::from_bi).collect();
         Self::build_selection(&units)
             .into_iter()
-            .map(|indices| ZS::new(indices.into_iter().map(|i| self.bis[i].clone()).collect()))
-            .collect()
+            .map(|selection| {
+                let band = selection.band(&units);
+                let level = selection.level();
+                let mut zs = ZS::new(
+                    selection
+                        .indices()
+                        .iter()
+                        .map(|&i| self.bis[i].clone())
+                        .collect(),
+                );
+                // 升级后区间不再等于前 3 笔重叠，需覆盖 `ZS::new` 的计算结果
+                zs.zd = band.zd;
+                zs.zg = band.zg;
+                zs.zz = band.mid();
+                (zs, level)
+            })
+            .unzip()
     }
 
-    /// 对任意中枢构件做原生划分 + 前端/后端优化，返回每个中枢的构件下标。
+    /// 对任意中枢构件做原生划分 + 前端/后端优化 + 九段升级，返回每个中枢的
+    /// 构件下标与可选的高一级区间。
     ///
     /// 笔中枢与段中枢共用此实现：调用方只需提供 [`PivotUnit`] 视图，再把
     /// 选中的下标映射回自己的对象（`ZS` / `SegmentPivot`）。
-    pub(crate) fn build_selection(units: &[PivotUnit]) -> Vec<Vec<usize>> {
+    pub(crate) fn build_selection(units: &[PivotUnit]) -> Vec<PivotSelection> {
         let native = Self::native_groups(units);
 
         // 第一遍：前端优化 + 行情趋势链（方向按中枢高低位置递推）
         let mut fronts: Vec<(Vec<usize>, CzscDirection)> = Vec::new();
-        let mut prev_zz: Option<f64> = None;
-        let mut prev_trend: Option<CzscDirection> = None;
+        let mut prev: Option<(f64, CzscDirection)> = None;
         for group in &native {
-            let (zd, zg) = PivotUnit::band(units, group);
-            let zz = zd + (zg - zd) * 0.5;
+            let zz = PivotUnit::band(units, group).mid();
             // 行情方向：按中枢高低位置判定（当前中枢用原生中轴与前一中枢的
             // 最终中轴比较；剔除进入构件对中轴影响很小，不影响方向判定）
-            let trend = match prev_zz {
-                None => {
-                    if zz > units[0].start_price {
-                        CzscDirection::Up
-                    } else {
-                        CzscDirection::Down
-                    }
-                }
-                Some(prev) if zz > prev => CzscDirection::Up,
-                Some(prev) if zz < prev => CzscDirection::Down,
-                Some(_) => prev_trend.unwrap_or(CzscDirection::Up),
+            let trend = match prev {
+                None if zz > units[0].start_price => CzscDirection::Up,
+                None => CzscDirection::Down,
+                Some((prev_zz, _)) if zz > prev_zz => CzscDirection::Up,
+                Some((prev_zz, _)) if zz < prev_zz => CzscDirection::Down,
+                // 中轴平齐沿用前一趋势
+                Some((_, previous)) => previous,
             };
             let Some(trimmed) = Self::trim_front(units, group, trend) else {
                 continue;
             };
-            let (trimmed_zd, trimmed_zg) = PivotUnit::band(units, &trimmed);
-            prev_zz = Some(trimmed_zd + (trimmed_zg - trimmed_zd) * 0.5);
-            prev_trend = Some(trend);
+            prev = Some((PivotUnit::band(units, &trimmed).mid(), trend));
             fronts.push((trimmed, trend));
         }
 
@@ -146,7 +357,71 @@ impl<'a> PivotAnalyzer<'a> {
             result.push(trimmed);
         }
         result.reverse();
-        result
+        Self::upgrade_chains(units, &result)
+    }
+
+    /// 九段升级：相邻且区间重叠的中枢串成一条链，链内构件跨度达到九段且
+    /// 三三得九交集非空时合并为一个高一级中枢（替换子中枢），并继续吸收与
+    /// 高一级区间重叠的后续中枢（被吸收者同样纳入包络）。升级区间由三三得九
+    /// 交集与全部子中枢区间的包络决定，左右与上下都只加宽不收窄。只做一级
+    /// 升级，升级结果不再参与二次合并。
+    fn upgrade_chains(units: &[PivotUnit], groups: &[Vec<usize>]) -> Vec<PivotSelection> {
+        let mut selections: Vec<PivotSelection> = Vec::new();
+        let mut next = 0;
+        while next < groups.len() {
+            let Some(&first) = groups[next].first() else {
+                next += 1;
+                continue;
+            };
+            // 先按 level-1 区间重叠串链（扩展的候选范围）
+            let mut end = next;
+            while end + 1 < groups.len()
+                && Self::groups_overlap(units, &groups[end], &groups[end + 1])
+            {
+                end += 1;
+            }
+            let Some(upgrade) = Self::chain_upgrade(units, &groups[next..=end]) else {
+                selections.extend(groups[next..=end].iter().map(|group| PivotSelection {
+                    indices: group.clone(),
+                    upgrade: None,
+                }));
+                next = end + 1;
+                continue;
+            };
+            // 高一级中枢必须包住全部子中枢：三三得九交集与子中枢包络取并，
+            // 价格区间只加宽不收窄
+            let mut band = groups[next..=end].iter().fold(upgrade, |band, group| {
+                band.hull(PivotUnit::band(units, group))
+            });
+            // 升级后继续吸收与高一级区间重叠的后续中枢
+            while end + 1 < groups.len() && PivotUnit::band(units, &groups[end + 1]).overlaps(band)
+            {
+                end += 1;
+                band = band.hull(PivotUnit::band(units, &groups[end]));
+            }
+            // 组非空由 `native_groups` 保证；退化时以首个构件为端点，不丢中枢
+            let last = groups[end].last().copied().unwrap_or(first);
+            selections.push(PivotSelection {
+                indices: (first..=last).collect(),
+                upgrade: Some(band),
+            });
+            next = end + 1;
+        }
+        selections
+    }
+
+    /// 一条 level-1 中枢链升级后的区间：构建跨度不足九段或三三得九交集为空
+    /// 时返回 `None`（保持原级别）。
+    fn chain_upgrade(units: &[PivotUnit], chain: &[Vec<usize>]) -> Option<Band> {
+        let first = *chain.first()?.first()?;
+        let last = *chain.last()?.last()?;
+        // 链内构件连续：中间被两端修剪掉的离开/连接构件计入九段跨度
+        PivotUnit::upgrade_band(units, first, last)
+    }
+
+    /// 两个中枢组（构件下标）的区间是否相交。
+    fn groups_overlap(units: &[PivotUnit], left: &[usize], right: &[usize]) -> bool {
+        PivotUnit::band(units, left).overlaps(PivotUnit::band(units, right))
     }
 
     /// 原生贪心划分（与 `czsc-core::get_zs_seq` 一致）。
@@ -154,15 +429,10 @@ impl<'a> PivotAnalyzer<'a> {
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for (i, unit) in units.iter().enumerate() {
             // 构件完全离开当前中枢区间时另起一组；首构件无区间可直接开组。
-            let leave = groups.last().is_none_or(|current| {
-                let (zd, zg) = PivotUnit::band(units, current);
-                match unit.direction {
-                    CzscDirection::Up => unit.high < zd,
-                    CzscDirection::Down => unit.low > zg,
-                }
-            });
             match groups.last_mut() {
-                Some(current) if !leave => current.push(i),
+                Some(current) if PivotUnit::stays_in(PivotUnit::band(units, current), unit) => {
+                    current.push(i);
+                }
                 _ => groups.push(vec![i]),
             }
         }
@@ -175,23 +445,30 @@ impl<'a> PivotAnalyzer<'a> {
         group: &[usize],
         trend: CzscDirection,
     ) -> Option<Vec<usize>> {
-        let mut indices = group.to_vec();
-        if indices.len() < 3 {
-            return None;
-        }
         // 前端：首构件与趋势同向 = 进入/连接构件，剔除
-        if units[indices[0]].direction == trend {
-            indices.remove(0);
-            if indices.len() < 3 {
-                return None;
-            }
-        }
+        let skip = usize::from(units[*group.first()?].direction == trend);
+        let indices = group
+            .get(skip..)
+            .filter(|rest| rest.len() >= PivotUnit::MIN_PIVOT_UNITS)?
+            .to_vec();
         // 区间 [zd, zg] = 前 3 个构件的重叠（剔除进入构件后重新计算）
-        let (zd, zg) = PivotUnit::band(units, &indices);
-        if zg < zd {
-            return None;
-        }
-        Some(indices)
+        PivotUnit::band(units, &indices)
+            .is_valid()
+            .then_some(indices)
+    }
+
+    /// 末构件是否必须剔除：与趋势同向（离开构件），或与后一中枢共享/相交端点。
+    ///
+    /// 间隔规则优先级低于前端：后中枢前端不动，由本中枢（前中枢）末端退回。
+    fn leaves(
+        units: &[PivotUnit],
+        trend: CzscDirection,
+        next_start: Option<usize>,
+        index: usize,
+    ) -> bool {
+        let unit = &units[index];
+        let shares = next_start.is_some_and(|start| unit.end_index.is_some_and(|end| end >= start));
+        shares || unit.direction == trend
     }
 
     /// 剔除中枢的离开构件（后端），返回优化后的构件下标。
@@ -202,40 +479,23 @@ impl<'a> PivotAnalyzer<'a> {
         next_start: Option<usize>,
     ) -> Option<Vec<usize>> {
         let mut indices = group;
-        loop {
-            if indices.len() <= 3 {
-                break;
-            }
-            let Some(&last_idx) = indices.last() else {
-                break;
-            };
-            let last = &units[last_idx];
-            // 规则二（间隔，优先级低于前端）：与后一中枢共享/相交端点时，
-            // 后中枢前端不动（前端优先），本中枢（前中枢）末端退回一构件
-            let shares = next_start.is_some_and(|s| last.end_index.is_some_and(|e| e >= s));
-            // 规则一（方向）：退回后若末构件与趋势同向（离开构件），还需再退一构件
-            let wrong_dir = last.direction == trend;
-            if !shares && !wrong_dir {
-                break;
-            }
+        while indices.len() > PivotUnit::MIN_PIVOT_UNITS
+            && indices
+                .last()
+                .is_some_and(|&i| Self::leaves(units, trend, next_start, i))
+        {
             indices.pop();
         }
-        if indices.len() < 3 {
-            return None;
-        }
-        let last = &units[*indices.last()?];
-        if last.direction == trend
-            || next_start.is_some_and(|s| last.end_index.is_some_and(|e| e >= s))
-        {
-            return None;
-        }
-        Some(indices)
+        let keep = indices.len() >= PivotUnit::MIN_PIVOT_UNITS
+            && !indices
+                .last()
+                .is_some_and(|&i| Self::leaves(units, trend, next_start, i));
+        keep.then_some(indices)
     }
 
     /// 三买/三卖缠论严格化：每个中枢最多一个三买（405）和一个三卖（406）。
     pub(crate) fn strictize_third_points(points: &mut Vec<BuySellPoint>, pivots: &[ZS]) {
-        let mut seen_405: Vec<usize> = Vec::new();
-        let mut seen_406: Vec<usize> = Vec::new();
+        let mut seen: HashSet<(u32, usize)> = HashSet::new();
         points.retain(|p| {
             if p.func_id != 405 && p.func_id != 406 {
                 return true;
@@ -247,18 +507,7 @@ impl<'a> PivotAnalyzer<'a> {
             else {
                 return false;
             };
-            if p.func_id == 405 {
-                if seen_405.contains(&zi) {
-                    return false;
-                }
-                seen_405.push(zi);
-            } else {
-                if seen_406.contains(&zi) {
-                    return false;
-                }
-                seen_406.push(zi);
-            }
-            true
+            seen.insert((p.func_id, zi))
         });
     }
 }
@@ -266,14 +515,23 @@ impl<'a> PivotAnalyzer<'a> {
 /// 段中枢：以已确认段为构件、由笔中枢同一套规则选出并计算几何。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SegmentPivot {
-    pub(crate) zg: f64,
-    pub(crate) zd: f64,
-    pub(crate) zz: f64,
-    pub(crate) start_index: Option<usize>,
-    pub(crate) end_index: Option<usize>,
+    band: Band,
+    level: PivotLevel,
+    start_index: Option<usize>,
+    end_index: Option<usize>,
 }
 
 impl SegmentPivot {
+    /// 中枢价格区间（上下沿与中轴由 [`Band`] 统一给出）。
+    pub(crate) fn band(&self) -> Band {
+        self.band
+    }
+
+    /// 中枢级别：本级或九段升级后的高一级中枢。
+    pub(crate) fn level(&self) -> PivotLevel {
+        self.level
+    }
+
     /// 绘制区间：首个构件起点 → 末个构件终点（缺失时该中枢不绘制）。
     pub(crate) fn span(&self) -> Option<(usize, usize)> {
         let start = self.start_index?;
@@ -314,14 +572,13 @@ impl<'a> SegmentPivotAnalyzer<'a> {
 
         PivotAnalyzer::build_selection(&units)
             .into_iter()
-            .filter_map(|indices| {
+            .filter_map(|selection| {
+                let indices = selection.indices();
                 let first = *indices.first()?;
                 let last = *indices.last()?;
-                let (zd, zg) = PivotUnit::band(&units, &indices);
                 Some(SegmentPivot {
-                    zg,
-                    zd,
-                    zz: zd + (zg - zd) * 0.5,
+                    band: selection.band(&units),
+                    level: selection.level(),
                     start_index: units[first].start_index,
                     end_index: units[last].end_index,
                 })
@@ -335,6 +592,229 @@ mod tests {
     use super::*;
     use crate::analyzer::fixtures::make_series_bi;
     use crate::analyzer::objects::BiAnchor;
+
+    /// 构造构件视图（测试用）：绘制端点编码为 `index` / `index + 1`。
+    fn unit(direction: CzscDirection, low: f64, high: f64, index: usize) -> PivotUnit {
+        PivotUnit {
+            direction,
+            high,
+            low,
+            start_index: Some(index),
+            end_index: Some(index + 1),
+            start_price: low,
+        }
+    }
+
+    /// 九段一三三得九：11 个交替构件经前端/后端修剪后剩 9 个，升级区间取
+    /// 三组包络的交集，再与 level-1 子中枢区间取包络（只加宽不收窄）。
+    #[test]
+    fn upgrade_after_nine_units() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 5.0, 20.0, 0), // 进入构件，前端剔除
+            unit(Down, 12.0, 20.0, 1),
+            unit(Up, 12.0, 18.0, 2),
+            unit(Down, 13.0, 18.0, 3),
+            unit(Up, 13.0, 19.0, 4),
+            unit(Down, 14.0, 19.0, 5),
+            unit(Up, 14.0, 18.0, 6),
+            unit(Down, 15.0, 18.0, 7),
+            unit(Up, 15.0, 19.0, 8),
+            unit(Down, 16.0, 19.0, 9),
+            unit(Up, 16.0, 18.0, 10), // 离开构件，后端剔除
+        ];
+        let selections = PivotAnalyzer::build_selection(&units);
+        assert_eq!(selections.len(), 1, "九段中枢应升级为单个高一级中枢");
+        assert_eq!(selections[0].indices(), &[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        // 三三得九交集 (15,19)；子中枢 [13,18]；包络后 (13,19)
+        assert_eq!(selections[0].band(&units), Band { zd: 13.0, zg: 19.0 });
+    }
+
+    /// 不足九段不升级：8 个构件仍按 level-1 处理。
+    #[test]
+    fn eight_units_stay_at_level_one() {
+        use CzscDirection::{Down, Up};
+        let units: Vec<PivotUnit> = (0..8)
+            .map(|i| unit(if i % 2 == 0 { Up } else { Down }, 10.0, 20.0, i))
+            .collect();
+        assert!(PivotUnit::subtrends(&units, 0, 7).is_none());
+        assert!(PivotUnit::upgrade_band(&units, 0, 7).is_none());
+    }
+
+    /// 尾巴不足 3 个构件时并入末段，不改变前 3 组的交集口径。
+    #[test]
+    fn tail_units_join_last_subtrend() {
+        use CzscDirection::{Down, Up};
+        let units: Vec<PivotUnit> = (0..11)
+            .map(|i| unit(if i % 2 == 0 { Up } else { Down }, 10.0, 20.0, i))
+            .collect();
+        let trends = PivotUnit::subtrends(&units, 0, 10).expect("11 个构件应能三三得九");
+        assert_eq!(trends.len(), 3, "尾巴应并入末段而不是新开一段");
+        assert_eq!(
+            PivotUnit::upgrade_band(&units, 0, 10),
+            PivotUnit::upgrade_band(&units, 0, 8)
+        );
+    }
+
+    /// 中枢扩展：相邻重叠中枢合计跨度九段时整条链升级。
+    #[test]
+    fn adjacent_overlapping_pivots_merge_at_nine() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 10.0, 20.0, 0),
+            unit(Down, 11.0, 20.0, 1),
+            unit(Up, 11.0, 19.0, 2),
+            // 连接构件：不属于任何中枢，但计入九段跨度
+            unit(Down, 18.0, 26.0, 3),
+            unit(Up, 18.0, 26.0, 4),
+            unit(Down, 19.0, 26.0, 5),
+            // 后一中枢：与前一中枢 [11,19] 重叠
+            unit(Up, 12.0, 22.0, 6),
+            unit(Down, 13.0, 22.0, 7),
+            unit(Up, 13.0, 21.0, 8),
+        ];
+        let selections = PivotAnalyzer::upgrade_chains(&units, &[vec![0, 1, 2], vec![6, 7, 8]]);
+        assert_eq!(selections.len(), 1, "九段链应合并为一个高一级中枢");
+        assert_eq!(selections[0].indices(), &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        // 三组包络 [10,20]、[18,26]、[12,22] 的交集 (18,20)；子中枢
+        // [11,19] 与 [13,21]；包络后 (11,21)——高一级中枢不得窄于子中枢
+        assert_eq!(selections[0].band(&units), Band { zd: 11.0, zg: 21.0 });
+    }
+
+    /// 相邻重叠中枢跨度不足九段时保持两个独立中枢。
+    #[test]
+    fn adjacent_overlapping_pivots_stay_below_nine() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 10.0, 20.0, 0),
+            unit(Down, 11.0, 20.0, 1),
+            unit(Up, 11.0, 19.0, 2),
+            unit(Down, 12.0, 19.0, 3),
+            unit(Up, 12.0, 19.0, 4),
+            unit(Down, 13.0, 21.0, 5),
+            unit(Up, 13.0, 21.0, 6),
+            unit(Down, 14.0, 21.0, 7),
+        ];
+        let selections = PivotAnalyzer::upgrade_chains(&units, &[vec![0, 1, 2], vec![5, 6, 7]]);
+        assert_eq!(selections.len(), 2, "跨度 8 段不足九段");
+        assert!(selections.iter().all(|s| s.upgrade.is_none()));
+    }
+
+    /// 升级不得缩窄：高一级区间必须包住链内每个子中枢的 `[zd, zg]`
+    /// （三三得九交集比子中枢窄时以包络为准）。
+    #[test]
+    fn upgrade_never_narrows_child_pivots() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 10.0, 20.0, 0),
+            unit(Down, 11.0, 20.0, 1),
+            unit(Up, 11.0, 19.0, 2),
+            unit(Down, 16.0, 26.0, 3),
+            unit(Up, 16.0, 26.0, 4),
+            unit(Down, 17.0, 26.0, 5),
+            unit(Up, 14.0, 24.0, 6),
+            unit(Down, 15.0, 24.0, 7),
+            unit(Up, 15.0, 23.0, 8),
+        ];
+        let children = [vec![0, 1, 2], vec![6, 7, 8]];
+        let selections = PivotAnalyzer::upgrade_chains(&units, &children);
+        assert_eq!(selections.len(), 1, "九段链应升级");
+        let band = selections[0].band(&units);
+        for child in &children {
+            let child = PivotUnit::band(&units, child);
+            assert!(
+                band.zd <= child.zd && band.zg >= child.zg,
+                "升级区间 [{},{}] 必须包住子中枢 [{},{}]",
+                band.zd,
+                band.zg,
+                child.zd,
+                child.zg
+            );
+        }
+        // 三三得九交集 (16,20) 比子中枢窄，包络后应为 (11,23)
+        assert_eq!(band, Band { zd: 11.0, zg: 23.0 });
+    }
+
+    /// 区间不重叠的中枢即使跨度达到九段也不合并（趋势而非扩展）。
+    #[test]
+    fn trend_pivots_never_merge() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 10.0, 15.0, 0),
+            unit(Down, 11.0, 15.0, 1),
+            unit(Up, 11.0, 14.0, 2),
+            unit(Down, 16.0, 20.0, 3),
+            unit(Up, 16.0, 20.0, 4),
+            unit(Down, 17.0, 20.0, 5),
+            unit(Up, 30.0, 35.0, 6),
+            unit(Down, 31.0, 35.0, 7),
+            unit(Up, 31.0, 34.0, 8),
+        ];
+        let selections = PivotAnalyzer::upgrade_chains(&units, &[vec![0, 1, 2], vec![6, 7, 8]]);
+        assert_eq!(selections.len(), 2, "区间不重叠的中枢不得合并");
+    }
+
+    /// 三组包络交集为空时安全降级，保持原级别。
+    #[test]
+    fn empty_upgrade_band_keeps_level_one() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 10.0, 20.0, 0),
+            unit(Down, 11.0, 20.0, 1),
+            unit(Up, 11.0, 19.0, 2),
+            unit(Down, 30.0, 40.0, 3),
+            unit(Up, 30.0, 40.0, 4),
+            unit(Down, 31.0, 40.0, 5),
+            unit(Up, 12.0, 18.0, 6),
+            unit(Down, 13.0, 18.0, 7),
+            unit(Up, 13.0, 17.0, 8),
+        ];
+        let selections = PivotAnalyzer::upgrade_chains(&units, &[vec![0, 1, 2], vec![6, 7, 8]]);
+        assert_eq!(selections.len(), 2, "无交集时退回原级别");
+        assert!(selections.iter().all(|s| s.upgrade.is_none()));
+    }
+
+    /// 延伸：构件持续与区间相交时中枢不中断，完全离开的构件另起中枢。
+    #[test]
+    fn extension_continues_until_unit_leaves_band() {
+        use CzscDirection::{Down, Up};
+        let units = vec![
+            unit(Up, 5.0, 20.0, 0), // 进入构件
+            unit(Down, 12.0, 20.0, 1),
+            unit(Up, 12.0, 18.0, 2),
+            unit(Down, 13.0, 18.0, 3),
+            unit(Up, 13.0, 19.0, 4), // 仍与区间相交，延伸进中枢后作为离开构件剔除
+            unit(Down, 21.0, 26.0, 5), // 完全离开 [13,18] → 另起中枢
+            unit(Up, 21.0, 26.0, 6),
+            unit(Down, 22.0, 26.0, 7),
+            unit(Up, 22.0, 25.0, 8),
+        ];
+        let selections = PivotAnalyzer::build_selection(&units);
+        assert_eq!(selections.len(), 2, "完全离开构件应另起中枢");
+        assert_eq!(selections[0].indices(), &[1, 2, 3]);
+        assert_eq!(selections[1].indices(), &[5, 6, 7]);
+    }
+
+    /// 端到端：升级区间覆盖 `ZS::new` 的前 3 笔计算结果。
+    #[test]
+    fn upgrade_overrides_zs_band() {
+        let prices = [
+            5.0, 20.0, 12.0, 18.0, 13.0, 19.0, 14.0, 18.0, 15.0, 19.0, 16.0, 18.0,
+        ];
+        let bis: Vec<BI> = prices
+            .windows(2)
+            .enumerate()
+            .map(|(i, pair)| make_series_bi(i as i64, pair[0], pair[1]))
+            .collect();
+        let pivots = PivotAnalyzer::new(&bis).build();
+        assert_eq!(pivots.len(), 1, "九段中枢应替换子中枢");
+        let zs = &pivots[0];
+        assert_eq!(zs.bis.len(), 9);
+        assert_eq!((zs.zd, zs.zg), (13.0, 19.0));
+        assert_eq!(zs.zz, 16.0);
+        assert_eq!(zs.bis.first().and_then(|b| b.start_index()), Some(1));
+        assert_eq!(zs.bis.last().and_then(|b| b.end_index()), Some(10));
+    }
 
     /// 中枢前端/后端优化（原生 get_zs_seq + build_pivots 全链路）：
     /// - 前端：上升行情中枢第一笔向下、下跌行情第一笔向上；

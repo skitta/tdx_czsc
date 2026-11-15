@@ -220,8 +220,8 @@ fn assert_invariants(series: &Series, high: &[f32], low: &[f32], close: &[f32], 
         };
         // 段尾：下一个同类买点 bar 或数据末尾
         let mut end = n;
-        for t in (b + 1)..n {
-            if series.buy_at[t] != Some(b) {
+        for (t, &buy_at) in series.buy_at.iter().enumerate().skip(b + 1) {
+            if buy_at != Some(b) {
                 end = t;
                 break;
             }
@@ -229,11 +229,8 @@ fn assert_invariants(series: &Series, high: &[f32], low: &[f32], close: &[f32], 
         let triggers: Vec<usize> = (b..end).filter(|&t| series.trigger[t]).collect();
         match triggers.first() {
             None => {
-                for t in b..end {
-                    assert!(
-                        series.terminated_at[t].is_none(),
-                        "未触发段不应有终止标记, {t}"
-                    );
+                for (t, &terminated) in series.terminated_at.iter().enumerate().take(end).skip(b) {
+                    assert!(terminated.is_none(), "未触发段不应有终止标记, {t}");
                 }
             }
             Some(&f) => {
@@ -244,9 +241,9 @@ fn assert_invariants(series: &Series, high: &[f32], low: &[f32], close: &[f32], 
                         "首次穿线bar {f} 之前不得有触发/终止, {t}"
                     );
                 }
-                for t in f..end {
+                for (t, &terminated) in series.terminated_at.iter().enumerate().take(end).skip(f) {
                     assert_eq!(
-                        series.terminated_at[t],
+                        terminated,
                         Some(f),
                         "首次穿线bar {f} 之后段内已触发应恒真(终止绘画), {t}"
                     );
